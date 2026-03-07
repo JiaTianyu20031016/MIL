@@ -134,7 +134,11 @@ dev = [
 ]
 
 [tool.setuptools]
-package-dir = {"trl" = "trl"}
+package-dir = {"trl" = "trl", "MIL" = "MIL"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["trl*", "MIL*"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }
