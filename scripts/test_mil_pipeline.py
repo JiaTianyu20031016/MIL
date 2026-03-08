@@ -15,14 +15,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from MILdata.dataset import (  # pylint: disable=wrong-import-position
+from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
     TokenizedDocumentDataset,
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
 )
-from MILmodel.simple_mil_model import SimpleMILModel  # pylint: disable=wrong-import-position
+from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM  # pylint: disable=wrong-import-position
 from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-position
-from trl.trainer.reward_config import RewardConfig  # pylint: disable=wrong-import-position
+from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
 
 DEFAULT_BACKBONE = "/data2/Common_LLM_Base/Qwen/Qwen3-Embedding-0.6B/"
@@ -30,7 +30,11 @@ DEFAULT_BACKBONE = "/data2/Common_LLM_Base/Qwen/Qwen3-Embedding-0.6B/"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", default="imdb_sent", help="Name of the MIL dataset to load.")
+    parser.add_argument(
+        "--dataset", 
+        default="MILdata/PRM800K/data/data_balanced", 
+        help="Name of the MIL dataset to load."
+    )
     parser.add_argument(
         "--backbone",
         default=DEFAULT_BACKBONE,
@@ -39,30 +43,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=8,
+        default=1024,
         help="Number of documents to keep for the smoke test (0 = all).",
     )
     parser.add_argument(
         "--max-length",
         type=int,
-        default=1024,
+        default=4096,
         help="Maximum number of tokens per flattened document sequence.",
     )
     parser.add_argument(
         "--per-device-batch-size",
         type=int,
-        default=2,
+        default=8,
         help="Per-device batch size used by the trainer.",
     )
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=2,
+        default=1024,
         help="Maximum number of optimizer steps to run (kept very small for testing).",
     )
     parser.add_argument(
         "--output-dir",
-        default=str(REPO_ROOT / "trainer_output" / "mil_integration_test"),
+        default='MIL/ckpts/',
         help="Where to store trainer outputs/checkpoints.",
     )
     parser.add_argument(
@@ -73,8 +77,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _prepare_samples(name: str, limit: int | None) -> Sequence:
-    samples = load_mil_dataset(name)
+def _prepare_samples(name: str, split: str, limit: int | None = None) -> Sequence:
+    samples = load_mil_dataset(hf_dataset=name, split=split)
     if limit and limit > 0:
         samples = samples[:limit]
     if not samples:
@@ -102,20 +106,16 @@ def main() -> None:
     )
     _ensure_padding_token(tokenizer)
 
-    samples = _prepare_samples(args.dataset, args.limit)
-    dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer, max_length=args.max_length)
-    collator = create_mil_data_collator(tokenizer)
+    model = ProbAveragePoolMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
 
-    model = SimpleMILModel.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
-
-    training_args = RewardConfig(
+    training_args = MILConfig(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         per_device_eval_batch_size=args.per_device_batch_size,
         max_steps=args.max_steps,
         num_train_epochs=1,
         logging_steps=1,
-        save_strategy="no",
+        save_strategy="epoch",
         eval_strategy="no",
         report_to=[],
         remove_unused_columns=False,
@@ -125,14 +125,29 @@ def main() -> None:
         dataloader_pin_memory=False,
     )
 
-    logging.info("Dataset size: %d documents", len(dataset))
+    ##############
+    # Load dataset
+    ##############
+    collator = create_mil_data_collator(tokenizer)
+
+    samples = load_mil_dataset(hf_dataset=args.dataset, split="train")
+    train_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    
+    samples = load_mil_dataset(hf_dataset=args.dataset, split="test")
+    eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+
+    ##########
+    # Training
+    ##########
     trainer = MILTrainer(
         model=model,
-        args=training_args,
-        train_dataset=dataset,
-        data_collator=collator,
         processing_class=tokenizer,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=collator,
     )
+    trainer.train()
 
     train_result = trainer.train()
     logging.info(

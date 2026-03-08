@@ -53,8 +53,8 @@ from ..models import get_act_offloading_ctx_manager
 from .base_trainer import _BaseTrainer
 from .reward_config import RewardConfig
 from .utils import create_model_from_path, disable_dropout_in_model, get_config_model_id, pad, remove_none_values
-from MILdata.collator import MILDataCollator
-from MILdata.dataset import TokenizedDocumentDataset
+
+from MILmodel.mil_base import MILModelOutput
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel, get_peft_model
@@ -160,7 +160,6 @@ class MILTrainer(_BaseTrainer):
             Configuration for this trainer. If `None`, a default configuration is used.
         data_collator ([`~transformers.DataCollator`], *optional*):
             Function to use to form a batch from a list of elements of the processed `train_dataset` or `eval_dataset`.
-            Will default to [`MILDataCollator`].
         train_dataset ([`~datasets.Dataset`] or [`~datasets.IterableDataset`]):
             Dataset to use for training. This trainer supports [preference](#preference) type (both implicit and
             explicit prompt). The format of the samples can be either:
@@ -375,13 +374,11 @@ class MILTrainer(_BaseTrainer):
 
         # Data collator
         if data_collator is None:
-            data_collator = MILDataCollator(pad_token_id=pad_token_id)
-
+            raise ValueError("`data_collator` is required. Please provide an instance of `MILDataCollator` or a custom data collator.")
+        
         # Dataset
-        assert isinstance(train_dataset, TokenizedDocumentDataset)
         train_dataset = self._prepare_dataset(train_dataset, processing_class, args, "train")
         if eval_dataset is not None:
-            assert isinstance(eval_dataset, TokenizedDocumentDataset)
             eval_dataset = self._prepare_dataset(eval_dataset, processing_class, args, "eval")
 
         # Transformers explicitly set use_reentrant=True in the past to silence a PyTorch warning, but the default was
@@ -425,7 +422,9 @@ class MILTrainer(_BaseTrainer):
         # Add tags to the model
         self.model.add_model_tags(self._tag_names)
 
-    # TODO: change the implementation of this function, to do some post-prosessing for MIL dataset
+        self.loss_type = args.loss_type
+
+
     def _prepare_dataset(
         self,
         dataset: Dataset | IterableDataset,
@@ -443,26 +442,122 @@ class MILTrainer(_BaseTrainer):
     #     if self._signature_columns is None:
     #         self._signature_columns = ["chosen_ids", "rejected_ids", "margin"]
 
-    # TODO: change the implementation to standard binary classification loss
-    # support some metrics for debugging
+    @staticmethod
+    def document_loss(outputs: MILModelOutput, document_target_prob: torch.Tensor) -> torch.Tensor:
+        '''
+        binary classification loss for document-level prediction.
+        '''
+        document_pred_probs = outputs.document_probs
+        if document_target_prob is None or document_pred_probs.size(0) == 0:
+            return None
+        
+        target = document_target_prob.to(document_pred_probs.device, dtype=document_pred_probs.dtype)
+        target = target.clamp(0.0, 1.0)
+        target_matrix = torch.stack([1.0 - target, target], dim=-1)
+        log_probs = torch.log(document_pred_probs.clamp_min(1e-8))
+        loss = -(target_matrix * log_probs).sum(dim=-1).mean()
+        return loss
+    
+    @staticmethod
+    def segment_loss(outputs: MILModelOutput, segment_target_prob: torch.Tensor, mask_ambiguous_labels: bool = True) -> torch.Tensor:
+        '''
+        Binary classification loss for segment-level prediction. 
+        When trained with segment-level labels, this is not actually MIL training, but rather standard supervised learning. 
+        '''
+        
+        # segment_valid_mask: (batch_size, max_segments)
+        # segment_pred_probs: (batch_size, max_segments, 2)
+        # segment_target_prob: (batch_size, max_segments)
+
+        # If mask_ambiguous_labels is True, we will ignore the segments after the first errorous segment (i.e. the first segment with target_prob < 1.0)
+        # since for math reasoning task, the segments after the first error are not labeled and can be either correct or incorrect, which can confuse the model during training. 
+        # If mask_ambiguous_labels is False, we will keep all segments for training.
+        # by default, we expect the segments after the first error are labeled as 0.
+        segment_valid_mask = outputs.segment_attention_mask.any(dim=-1)
+        if mask_ambiguous_labels:
+            first_error_mask = (segment_target_prob < 1.0) & segment_valid_mask
+            first_error_indices = torch.where(first_error_mask, torch.arange(segment_target_prob.size(1), device=segment_target_prob.device), segment_target_prob.size(1))
+            first_error_position = first_error_indices.min(dim=-1).values
+            batch_indices = torch.arange(segment_target_prob.size(0), device=segment_target_prob.device)
+            segment_valid_mask[batch_indices[:, None], torch.arange(segment_target_prob.size(1), device=segment_target_prob.device)[None, :]] &= (torch.arange(segment_target_prob.size(1), device=segment_target_prob.device)[None, :] < first_error_position[:, None])
+
+        segment_pred_probs = outputs.segment_probs[segment_valid_mask]
+        segment_target_prob = segment_target_prob[segment_valid_mask]
+        if segment_target_prob is None or segment_pred_probs.size(0) == 0:
+            return None
+        
+        target = segment_target_prob.to(segment_pred_probs.device, dtype=segment_pred_probs.dtype)
+        target = target.clamp(0.0, 1.0)
+        target_matrix = torch.stack([1.0 - target, target], dim=-1)
+        log_probs = torch.log(segment_pred_probs.clamp_min(1e-8))
+        loss = -(target_matrix * log_probs).sum(dim=-1).mean()
+        return loss
+    
+    @staticmethod
+    def noisy_segment_loss(outputs: MILModelOutput, document_target_prob: torch.Tensor) -> torch.Tensor:
+        '''
+        propagate the document-level label to segments as noisy labels, and calculate the cross-entropy loss for all segments with valid labels. 
+        '''
+        segment_valid_mask = outputs.segment_attention_mask.any(dim=-1)
+        segment_pred_probs = outputs.segment_probs[segment_valid_mask]
+        segment_target_prob = document_target_prob.unsqueeze(1).expand_as(outputs.segment_probs)[segment_valid_mask]
+        if segment_target_prob is None or segment_pred_probs.size(0) == 0:
+            return None
+
+        target = segment_target_prob.to(segment_pred_probs.device, dtype=segment_pred_probs.dtype)
+        target = target.clamp(0.0, 1.0)
+        target_matrix = torch.stack([1.0 - target, target], dim=-1)
+        log_probs = torch.log(segment_pred_probs.clamp_min(1e-8))
+        loss = -(target_matrix * log_probs).sum(dim=-1).mean()
+        return loss
+
+
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         mode = "train" if self.model.training else "eval"
 
         # If not set, defaults from model config and may warn since cache isn't compatible with gradient checkpointing
         inputs["use_cache"] = False
         outputs = model(**inputs)
-        document_probs = outputs.document_probs
 
-        document_positive_prob = inputs.get("positive_prob")
-
-        if document_positive_prob is None or document_probs.size(0) == 0:
-            return None
-        target = document_positive_prob.to(document_probs.device, dtype=document_probs.dtype)
-        target = target.clamp(0.0, 1.0)
-        target_matrix = torch.stack([1.0 - target, target], dim=-1)
-        log_probs = torch.log(document_probs.clamp_min(1e-8))
-        loss = -(target_matrix * log_probs).sum(dim=-1).mean()
+        document_target_prob = inputs.get("positive_prob")
+        segment_target_prob = inputs.get("segment_positive_prob")
+        if self.loss_type == "noisy_segment":
+            loss = self.noisy_segment_loss(outputs, document_target_prob)
+        elif self.loss_type == "document":
+            loss = self.document_loss(outputs, document_target_prob)
+        elif self.loss_type == "segment":
+            loss = self.segment_loss(outputs, segment_target_prob)
+        else:
+            raise ValueError(f"Invalid loss_type: {self.loss_type}. Supported values are 'document', 'segment', and 'noisy_segment'.")
         
+        # metrics
+        with torch.no_grad():
+            if document_target_prob is not None:
+                document_loss = self.document_loss(outputs, document_target_prob)
+                self._metrics[mode]["document_loss"].append(document_loss.item())
+            if segment_target_prob is not None:
+                segment_loss = self.segment_loss(outputs, segment_target_prob)
+                self._metrics[mode]["segment_loss"].append(segment_loss.item())
+
+            document_pred_labels = (outputs.document_probs[:, 1] >= 0.5).long()
+            segment_pred_labels = (outputs.segment_probs[:, :, 1] >= 0.5).long()
+            if document_target_prob is not None:
+                document_target_labels = (document_target_prob >= 0.5).long()
+                self._metrics[mode]["document_accuracy"].append((document_pred_labels == document_target_labels).float().mean().item())
+                if torch.any(document_target_labels == 1):
+                    self._metrics[mode]["document_positive_accuracy"].append(((document_pred_labels == 1) & (document_target_labels == 1)).float().sum().item() / (document_target_labels == 1).float().sum().item())
+                if torch.any(document_target_labels == 0):
+                    self._metrics[mode]["document_negative_accuracy"].append(((document_pred_labels == 0) & (document_target_labels == 0)).float().sum().item() / (document_target_labels == 0).float().sum().item())
+            if segment_target_prob is not None:
+                segment_target_labels = (segment_target_prob >= 0.5).long()
+                valid_mask = outputs.segment_attention_mask.any(dim=-1)
+                if valid_mask.sum() > 0:
+                    self._metrics[mode]["segment_accuracy"].append((segment_pred_labels[valid_mask] == segment_target_labels[valid_mask]).float().mean().item())
+                    if torch.any(segment_target_labels[valid_mask] == 1):
+                        self._metrics[mode]["segment_positive_accuracy"].append(((segment_pred_labels[valid_mask] == 1) & (segment_target_labels[valid_mask] == 1)).float().sum().item() / (segment_target_labels[valid_mask] == 1).float().sum().item())
+                    if torch.any(segment_target_labels[valid_mask] == 0):   
+                        self._metrics[mode]["segment_negative_accuracy"].append(((segment_pred_labels[valid_mask] == 0) & (segment_target_labels[valid_mask] == 0)).float().sum().item() / (segment_target_labels[valid_mask] == 0).float().sum().item())
+
         return (loss, outputs) if return_outputs else loss
 
     # Override training step to add activation offloading context.

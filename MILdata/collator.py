@@ -4,9 +4,6 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import torch
-from torch import Tensor
-
-
 class MILDataCollator:
     """Pads document- and segment-level sequences for MIL training."""
 
@@ -18,7 +15,7 @@ class MILDataCollator:
             raise ValueError("Collate batch is empty.")
 
         max_seq_len = max(len(item["input_ids"]) for item in batch)
-        max_segments = max(len(item["segment_ends"]) for item in batch)
+        max_segments = max(len(item["segment_token_ids"]) for item in batch)
         batch_size = len(batch)
 
         input_ids = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
@@ -28,26 +25,30 @@ class MILDataCollator:
             if max_segments > 0
             else torch.empty((batch_size, 0), dtype=torch.long)
         )
-
-        total_segments = sum(len(item["segment_token_ids"]) for item in batch)
         max_segment_len = (
             max((len(seg) for item in batch for seg in item["segment_token_ids"]), default=0)
-            if total_segments > 0
+            if max_segments > 0
             else 0
         )
-        if total_segments > 0 and max_segment_len > 0:
-            segment_input_ids = torch.full(
-                (total_segments, max_segment_len), self.pad_token_id, dtype=torch.long
-            )
-            segment_attention_mask = torch.zeros((total_segments, max_segment_len), dtype=torch.long)
+        if max_segments == 0:
+            segment_input_ids = torch.empty((batch_size, 0, 0), dtype=torch.long)
+            segment_attention_mask = torch.empty((batch_size, 0, 0), dtype=torch.long)
+            segment_positive_probs = torch.empty((batch_size, 0), dtype=torch.float32)
+        elif max_segment_len == 0:
+            segment_input_ids = torch.empty((batch_size, max_segments, 0), dtype=torch.long)
+            segment_attention_mask = torch.empty((batch_size, max_segments, 0), dtype=torch.long)
+            segment_positive_probs = torch.zeros((batch_size, max_segments), dtype=torch.float32)
         else:
-            segment_input_ids = torch.empty((total_segments, 0), dtype=torch.long)
-            segment_attention_mask = torch.empty((total_segments, 0), dtype=torch.long)
-        segment_to_doc = torch.empty(total_segments, dtype=torch.long)
+            segment_input_ids = torch.full(
+                (batch_size, max_segments, max_segment_len), self.pad_token_id, dtype=torch.long
+            )
+            segment_attention_mask = torch.zeros(
+                (batch_size, max_segments, max_segment_len), dtype=torch.long
+            )
+            segment_positive_probs = torch.zeros((batch_size, max_segments), dtype=torch.float32)
         document_texts: List[str] = []
-        segment_texts: List[str] = []
+        segment_texts: List[List[str]] = []
 
-        segment_row = 0
         for row, item in enumerate(batch):
             length = len(item["input_ids"])
             start = max_seq_len - length
@@ -58,26 +59,35 @@ class MILDataCollator:
             if max_segments > 0 and ends:
                 shifted = [pos + start if pos >= 0 else -1 for pos in ends]
                 segment_ends[row, : len(ends)] = torch.tensor(shifted, dtype=torch.long)
-
             document_texts.append(item.get("document_text", ""))
             segment_text_entries = item.get("segment_texts", [])
             if len(segment_text_entries) != len(item["segment_token_ids"]):
                 raise ValueError("segment_texts must align with segment_token_ids.")
+            segment_texts.append(list(segment_text_entries))
 
-            for segment_tokens, segment_text in zip(item["segment_token_ids"], segment_text_entries):
-                if max_segment_len > 0:
-                    seg_length = len(segment_tokens)
-                    trim_tokens = segment_tokens[-max_segment_len:]
-                    effective_len = len(trim_tokens)
-                    seg_start = max_segment_len - effective_len
-                    if effective_len > 0:
-                        segment_input_ids[segment_row, seg_start:] = torch.tensor(
-                            trim_tokens, dtype=torch.long
-                        )
-                        segment_attention_mask[segment_row, seg_start:] = 1
-                segment_to_doc[segment_row] = row
-                segment_texts.append(segment_text)
-                segment_row += 1
+            segment_probs = item.get("segment_positive_probs")
+            if segment_probs is None:
+                raise ValueError("segment_positive_probs missing from batch item.")
+            if len(segment_probs) != len(item["segment_token_ids"]):
+                raise ValueError("segment_positive_probs must align with segment_token_ids.")
+            if max_segments > 0 and len(segment_probs) > 0:
+                segment_positive_probs[row, : len(segment_probs)] = torch.tensor(
+                    segment_probs, dtype=torch.float32
+                )
+
+            for seg_idx, (segment_tokens, _) in enumerate(
+                zip(item["segment_token_ids"], segment_text_entries)
+            ):
+                if max_segment_len == 0:
+                    continue
+                trim_tokens = segment_tokens[-max_segment_len:]
+                effective_len = len(trim_tokens)
+                seg_start = max_segment_len - effective_len
+                if effective_len > 0:
+                    segment_input_ids[row, seg_idx, seg_start:] = torch.tensor(
+                        trim_tokens, dtype=torch.long
+                    )
+                    segment_attention_mask[row, seg_idx, seg_start:] = 1
 
         batch_tensor = {
             "input_ids": input_ids,
@@ -89,7 +99,7 @@ class MILDataCollator:
             "rating": torch.tensor([item["rating"] for item in batch], dtype=torch.long),
             "segment_input_ids": segment_input_ids,
             "segment_attention_mask": segment_attention_mask,
-            "segment_to_doc": segment_to_doc,
+            "segment_positive_probs": segment_positive_probs,
         }
         # keep metadata as lists for downstream logging/debugging
         batch_tensor.update(

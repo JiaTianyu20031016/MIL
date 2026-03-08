@@ -143,3 +143,8 @@ checklink/cookies.txt
 nbs/wandb/
 examples/notebooks/wandb/
 wandb/
+
+# data files
+MILdata/PRM800K/data/
+MILdata/sentiment/data/
+ckpts/

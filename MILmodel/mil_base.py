@@ -25,7 +25,7 @@ from MILmodel.model_wrapper import PreTrainedModelWrapper
 
 Batch = Mapping[str, Any]
 
-
+from collections import OrderedDict
 @dataclass
 class MILModelOutput(ModelOutput):
     """ModelOutput carrying probabilities and predictions"""
@@ -34,6 +34,7 @@ class MILModelOutput(ModelOutput):
     segment_probs: Optional[Tensor] = None
     document_predictions: Optional[Tensor] = None
     segment_predictions: Optional[Tensor] = None
+    extras: Optional[Dict[str, Tensor]] = None
 
 
 class BaseMILModel(PreTrainedModelWrapper):
@@ -74,6 +75,14 @@ class BaseMILModel(PreTrainedModelWrapper):
             return 0
         if not isinstance(segment_ids, Tensor):
             raise ValueError("'segment_input_ids' must be a tensor if present.")
+        segment_mask = batch.get("segment_attention_mask")
+        if isinstance(segment_mask, Tensor) and segment_ids.dim() == 3 and segment_mask.dim() == 3:
+            if segment_ids.shape[:2] != segment_mask.shape[:2]:
+                raise ValueError("Segment tensors must share batch and segment dimensions.")
+            valid_segments = segment_mask.any(dim=-1)
+            return int(valid_segments.sum().item())
+        
+        raise ValueError("Both 'segment_input_ids' and 'segment_attention_mask' must be 3D tensors if segments are present.")
         return segment_ids.size(0)
 
     @staticmethod
@@ -130,19 +139,9 @@ class BaseMILModel(PreTrainedModelWrapper):
         document_probs, segment_probs, extras = self._forward_impl(working_batch)
         doc_count = self._document_count(working_batch)
         seg_count = self._segment_count(working_batch)
-        document_probs = self._ensure_prob_matrix(
-            document_probs,
-            batch_size=doc_count,
-            matrix_name="document_probs",
-        )
-        segment_probs = self._ensure_prob_matrix(
-            segment_probs,
-            batch_size=seg_count,
-            matrix_name="segment_probs",
-        )
 
         document_pos_probs = document_probs[:, 1]
-        segment_pos_probs = segment_probs[:, 1]
+        segment_pos_probs = segment_probs[:, :, 1]
         document_predictions = (document_pos_probs >= self.decision_threshold).long()
         segment_predictions = (segment_pos_probs >= self.decision_threshold).long()
 
@@ -151,9 +150,9 @@ class BaseMILModel(PreTrainedModelWrapper):
             segment_probs=segment_probs,
             document_predictions=document_predictions,
             segment_predictions=segment_predictions,
+            extras=extras,
         )
-        if extras:
-            output.update(extras)
+
         return output
 
 
@@ -250,5 +249,30 @@ class BaseMILModel(PreTrainedModelWrapper):
             self.is_sequential_parallel = True
 
 
+class MLP(torch.nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
+        super().__init__()
+        self.layers = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, output_dim),
+        )
 
-__all__ = ["BaseMILModel", "MILModelOutput"]
+    def forward(self, x: Tensor) -> Tensor:
+        return self.layers(x)
+
+
+class LinearAttention(torch.nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+        self.attention = torch.nn.Linear(input_dim, 1)
+
+    def forward(self, x: Tensor, mask: Optional[Tensor] = None) -> Tensor:
+        attn_weights = self.attention(x)
+        if mask is not None:
+            attn_weights = attn_weights.masked_fill(mask.unsqueeze(-1) == 0, float("-inf"))
+        attn_weights = F.softmax(attn_weights, dim=1)
+        return attn_weights
+    
+
+__all__ = ["BaseMILModel", "MILModelOutput", "MLP", "LinearAttention"]

@@ -14,7 +14,9 @@
 
 import os
 
-from transformers import Trainer, is_wandb_available
+# from transformers import Trainer, is_wandb_available
+from transformers import is_wandb_available
+from .trainer import Trainer
 
 from .utils import generate_model_card, get_comet_experiment_url, get_config_model_id, get_trackio_space_url
 

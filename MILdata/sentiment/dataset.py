@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Literal, Optional, Seque
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from .collator import MILDataCollator
+from MILdata.collator import MILDataCollator
 
 _SENTIMENT_MAP: Dict[str, int] = {"+": 1, "-": -1, "0": 0}
 
@@ -188,6 +188,7 @@ class TokenizedDocumentDataset(Dataset):
                 "granularity": sample.granularity,
                 "document_text": " ".join(segment.text for segment in sample.segments).strip(),
                 "segment_texts": [segment.text for segment in sample.segments],
+                "segment_positive_probs": [segment.positive_prob for segment in sample.segments],
             }
         )
         return tokenized

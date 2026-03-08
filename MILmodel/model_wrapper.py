@@ -619,7 +619,6 @@ class PreTrainedModelWrapper(nn.Module):
             return getattr(pm, name)
     
 
-    
 class ValueHead(nn.Module):
     r"""
     The ValueHead class implements a head for GPT2 that returns a scalar for each output token.
