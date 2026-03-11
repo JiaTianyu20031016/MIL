@@ -75,6 +75,7 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 
 
 if __name__ == "__main__":
+    
     parser = HfArgumentParser((ScriptArguments, MILConfig, ModelConfig))
     script_args, training_args, model_args = parser.parse_args_into_dataclasses()
 
@@ -119,6 +120,8 @@ if __name__ == "__main__":
     samples = load_mil_dataset(hf_dataset=script_args.dataset_name, split=script_args.dataset_test_split)
     eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
 
+    from torch.utils.data import random_split
+    train_dataset, eval_dataset = random_split(train_dataset, [len(train_dataset) - 1000, 1000], generator=torch.Generator().manual_seed(42))
     ##########
     # Training
     ##########
@@ -131,7 +134,7 @@ if __name__ == "__main__":
         data_collator=collator,
         peft_config=get_peft_config(model_args),
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=True)
 
     ############################
     # Save model and push to Hub

@@ -459,7 +459,7 @@ class MILTrainer(_BaseTrainer):
         return loss
     
     @staticmethod
-    def segment_loss(outputs: MILModelOutput, segment_target_prob: torch.Tensor, mask_ambiguous_labels: bool = True) -> torch.Tensor:
+    def segment_loss(outputs: MILModelOutput, segment_target_prob: torch.Tensor, segment_valid_mask: torch.Tensor, mask_ambiguous_labels: bool = False) -> torch.Tensor:
         '''
         Binary classification loss for segment-level prediction. 
         When trained with segment-level labels, this is not actually MIL training, but rather standard supervised learning. 
@@ -473,16 +473,21 @@ class MILTrainer(_BaseTrainer):
         # since for math reasoning task, the segments after the first error are not labeled and can be either correct or incorrect, which can confuse the model during training. 
         # If mask_ambiguous_labels is False, we will keep all segments for training.
         # by default, we expect the segments after the first error are labeled as 0.
-        segment_valid_mask = outputs.segment_attention_mask.any(dim=-1)
+        effective_mask = segment_valid_mask
         if mask_ambiguous_labels:
+            # Clone to avoid in-place edits on tensors that autograd may need for gradient scattering.
+            effective_mask = segment_valid_mask.clone()
+            seq_indices = torch.arange(segment_target_prob.size(1), device=segment_target_prob.device)
             first_error_mask = (segment_target_prob < 1.0) & segment_valid_mask
-            first_error_indices = torch.where(first_error_mask, torch.arange(segment_target_prob.size(1), device=segment_target_prob.device), segment_target_prob.size(1))
+            first_error_indices = torch.where(first_error_mask, seq_indices, segment_target_prob.size(1))
             first_error_position = first_error_indices.min(dim=-1).values
             batch_indices = torch.arange(segment_target_prob.size(0), device=segment_target_prob.device)
-            segment_valid_mask[batch_indices[:, None], torch.arange(segment_target_prob.size(1), device=segment_target_prob.device)[None, :]] &= (torch.arange(segment_target_prob.size(1), device=segment_target_prob.device)[None, :] < first_error_position[:, None])
+            effective_mask[batch_indices[:, None], seq_indices[None, :]] &= (
+                seq_indices[None, :] <= first_error_position[:, None]
+            )
 
-        segment_pred_probs = outputs.segment_probs[segment_valid_mask]
-        segment_target_prob = segment_target_prob[segment_valid_mask]
+        segment_pred_probs = outputs.segment_probs[effective_mask]
+        segment_target_prob = segment_target_prob[effective_mask]
         if segment_target_prob is None or segment_pred_probs.size(0) == 0:
             return None
         
@@ -494,11 +499,10 @@ class MILTrainer(_BaseTrainer):
         return loss
     
     @staticmethod
-    def noisy_segment_loss(outputs: MILModelOutput, document_target_prob: torch.Tensor) -> torch.Tensor:
+    def noisy_segment_loss(outputs: MILModelOutput, document_target_prob: torch.Tensor, segment_valid_mask: torch.Tensor) -> torch.Tensor:
         '''
         propagate the document-level label to segments as noisy labels, and calculate the cross-entropy loss for all segments with valid labels. 
         '''
-        segment_valid_mask = outputs.segment_attention_mask.any(dim=-1)
         segment_pred_probs = outputs.segment_probs[segment_valid_mask]
         segment_target_prob = document_target_prob.unsqueeze(1).expand_as(outputs.segment_probs)[segment_valid_mask]
         if segment_target_prob is None or segment_pred_probs.size(0) == 0:
@@ -520,13 +524,14 @@ class MILTrainer(_BaseTrainer):
         outputs = model(**inputs)
 
         document_target_prob = inputs.get("positive_prob")
-        segment_target_prob = inputs.get("segment_positive_prob")
+        segment_target_prob = inputs.get("segment_positive_probs")
+        segment_valid_mask = inputs.get("segment_attention_mask").any(dim=-1)
         if self.loss_type == "noisy_segment":
-            loss = self.noisy_segment_loss(outputs, document_target_prob)
+            loss = self.noisy_segment_loss(outputs, document_target_prob, segment_valid_mask)
         elif self.loss_type == "document":
             loss = self.document_loss(outputs, document_target_prob)
         elif self.loss_type == "segment":
-            loss = self.segment_loss(outputs, segment_target_prob)
+            loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
         else:
             raise ValueError(f"Invalid loss_type: {self.loss_type}. Supported values are 'document', 'segment', and 'noisy_segment'.")
         
@@ -536,27 +541,49 @@ class MILTrainer(_BaseTrainer):
                 document_loss = self.document_loss(outputs, document_target_prob)
                 self._metrics[mode]["document_loss"].append(document_loss.item())
             if segment_target_prob is not None:
-                segment_loss = self.segment_loss(outputs, segment_target_prob)
+                segment_loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
                 self._metrics[mode]["segment_loss"].append(segment_loss.item())
 
-            document_pred_labels = (outputs.document_probs[:, 1] >= 0.5).long()
-            segment_pred_labels = (outputs.segment_probs[:, :, 1] >= 0.5).long()
+            document_pred_labels = outputs.document_predictions.long()  # (batch_size,)
+            segment_pred_labels = outputs.segment_predictions.long()    # (batch_size, max_segments)
+            document_target_labels = (document_target_prob >= 0.5).long()
+            segment_target_labels = (segment_target_prob >= 0.5).long()
             if document_target_prob is not None:
-                document_target_labels = (document_target_prob >= 0.5).long()
+                # document level prediction accuracy
                 self._metrics[mode]["document_accuracy"].append((document_pred_labels == document_target_labels).float().mean().item())
                 if torch.any(document_target_labels == 1):
                     self._metrics[mode]["document_positive_accuracy"].append(((document_pred_labels == 1) & (document_target_labels == 1)).float().sum().item() / (document_target_labels == 1).float().sum().item())
                 if torch.any(document_target_labels == 0):
                     self._metrics[mode]["document_negative_accuracy"].append(((document_pred_labels == 0) & (document_target_labels == 0)).float().sum().item() / (document_target_labels == 0).float().sum().item())
-            if segment_target_prob is not None:
-                segment_target_labels = (segment_target_prob >= 0.5).long()
-                valid_mask = outputs.segment_attention_mask.any(dim=-1)
-                if valid_mask.sum() > 0:
-                    self._metrics[mode]["segment_accuracy"].append((segment_pred_labels[valid_mask] == segment_target_labels[valid_mask]).float().mean().item())
-                    if torch.any(segment_target_labels[valid_mask] == 1):
-                        self._metrics[mode]["segment_positive_accuracy"].append(((segment_pred_labels[valid_mask] == 1) & (segment_target_labels[valid_mask] == 1)).float().sum().item() / (segment_target_labels[valid_mask] == 1).float().sum().item())
-                    if torch.any(segment_target_labels[valid_mask] == 0):   
-                        self._metrics[mode]["segment_negative_accuracy"].append(((segment_pred_labels[valid_mask] == 0) & (segment_target_labels[valid_mask] == 0)).float().sum().item() / (segment_target_labels[valid_mask] == 0).float().sum().item())
+            if segment_target_prob is not None and segment_valid_mask.sum() > 0:
+                # segement level prediction accuracy
+                self._metrics[mode]["segment_accuracy"].append((segment_pred_labels[segment_valid_mask] == segment_target_labels[segment_valid_mask]).float().mean().item())
+                if torch.any(segment_target_labels[segment_valid_mask] == 1):
+                    self._metrics[mode]["segment_positive_accuracy"].append(((segment_pred_labels[segment_valid_mask] == 1) & (segment_target_labels[segment_valid_mask] == 1)).float().sum().item() / (segment_target_labels[segment_valid_mask] == 1).float().sum().item())
+                if torch.any(segment_target_labels[segment_valid_mask] == 0):   
+                    self._metrics[mode]["segment_negative_accuracy"].append(((segment_pred_labels[segment_valid_mask] == 0) & (segment_target_labels[segment_valid_mask] == 0)).float().sum().item() / (segment_target_labels[segment_valid_mask] == 0).float().sum().item())
+            if document_target_prob is not None and segment_target_prob is not None and segment_valid_mask.sum() > 0:
+                # first-error detection accuracy: whether the model can correctly identify the first error segment. using F1 score
+                seq_indices = torch.arange(segment_pred_labels.size(1), device=segment_pred_labels.device)
+                seq_indices = seq_indices.unsqueeze(0).expand(segment_pred_labels.size(0), -1)
+                sentinel = segment_pred_labels.size(-1)
+                first_error_pred = torch.where(
+                    ((segment_pred_labels == 0) & segment_valid_mask), seq_indices, sentinel
+                ).min(dim=-1).values
+                first_error_target = torch.where(
+                    ((segment_target_labels == 0) & segment_valid_mask), seq_indices, sentinel
+                ).min(dim=-1).values
+                positive_document_mask = document_target_labels == 1
+                if positive_document_mask.any():
+                    true_positives = ((first_error_pred == first_error_target) & positive_document_mask).float().sum().item()
+                    error_detection_positive_accuracy = true_positives / (positive_document_mask).float().sum().item()
+                    self._metrics[mode]["error_detection_positive_accuracy"].append(error_detection_positive_accuracy)
+                if not positive_document_mask.all():
+                    true_negatives = ((first_error_pred == first_error_target) & ~positive_document_mask).float().sum().item()
+                    error_detection_negative_accuracy = true_negatives / (~positive_document_mask).float().sum().item()
+                    self._metrics[mode]["error_detection_negative_accuracy"].append(error_detection_negative_accuracy)
+                if positive_document_mask.any() and not positive_document_mask.all():
+                    self._metrics[mode]["error_detection_f1"].append(200 * error_detection_positive_accuracy * error_detection_negative_accuracy / (error_detection_positive_accuracy + error_detection_negative_accuracy + 1e-8))
 
         return (loss, outputs) if return_outputs else loss
 

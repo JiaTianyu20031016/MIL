@@ -36,6 +36,8 @@ from transformers import (
 )
 from transformers.utils import is_peft_available
 
+from collections.abc import Mapping, Sequence
+from typing import Any, Dict, List, Tuple
 
 if is_peft_available():
     from peft import (
@@ -618,6 +620,18 @@ class PreTrainedModelWrapper(nn.Module):
             pm = super().__getattr__("pretrained_model")
             return getattr(pm, name)
     
+    def load_state_dict(self, *args, **kwargs):
+        state_dict = kwargs["state_dict"] if "state_dict" in kwargs else args[0]
+        if state_dict is not None:
+            for key in list(self.pretrained_model.state_dict().keys()):
+                if key in state_dict:
+                    state_dict[f"pretrained_model.{key}"] = state_dict.pop(key)
+            if "state_dict" in kwargs:
+                kwargs["state_dict"] = state_dict
+            else:
+                args = (state_dict,) + args[1:]
+        return super().load_state_dict(*args, **kwargs)
+
 
 class ValueHead(nn.Module):
     r"""

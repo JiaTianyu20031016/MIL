@@ -10,6 +10,8 @@ from typing import Sequence
 
 import torch
 from transformers import AutoTokenizer
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"  # Adjust this based on your available GPUs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -20,12 +22,12 @@ from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
 )
-from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM  # pylint: disable=wrong-import-position
+from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM, AttentionPoolMILModelforPRM  # pylint: disable=wrong-import-position
 from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-position
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
 
-DEFAULT_BACKBONE = "/data2/Common_LLM_Base/Qwen/Qwen3-Embedding-0.6B/"
+DEFAULT_BACKBONE = "/data2/Common_LLM_Base/Qwen/Qwen3-4B/"
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +68,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        default='MIL/ckpts/',
+        default='ckpts/debug',
         help="Where to store trainer outputs/checkpoints.",
     )
     parser.add_argument(
@@ -106,7 +108,7 @@ def main() -> None:
     )
     _ensure_padding_token(tokenizer)
 
-    model = ProbAveragePoolMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
+    model = AttentionPoolMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
 
     training_args = MILConfig(
         output_dir=args.output_dir,
@@ -147,7 +149,7 @@ def main() -> None:
         eval_dataset=eval_dataset,
         data_collator=collator,
     )
-    trainer.train()
+    trainer.train(resume_from_checkpoint=True)
 
     train_result = trainer.train()
     logging.info(

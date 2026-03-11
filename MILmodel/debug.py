@@ -1,29 +1,18 @@
-from __future__ import annotations
+# Load model directly
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from typing import Any, Dict, Optional, Tuple
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-Math-1.5B-Instruct")
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-Math-1.5B-Instruct")
+messages = [
+    {"role": "user", "content": "Who are you?"},
+]
+inputs = tokenizer.apply_chat_template(
+	messages,
+	add_generation_prompt=True,
+	tokenize=True,
+	return_dict=True,
+	return_tensors="pt",
+).to(model.device)
 
-import torch
-from torch import Tensor, nn
-from transformers import AutoModel, AutoConfig, PretrainedConfig, PreTrainedModel, AutoModelForSequenceClassification
-
-class SimpleMILModel(PreTrainedModel):
-    """Feeds segment batches through a pretrained backbone and averages predictions per document."""
-
-    supported_modules = ()
-    
-    def __init__(
-        self,
-        config: Optional[PretrainedConfig] = None,
-        *,
-        backbone_name: Optional[str] = None,
-    ) -> None:
-
-        super().__init__(config=config, decision_threshold=threshold)
-
-        backbone_kwargs = config.backbone_kwargs or {}
-        self.backbone_config = AutoConfig.from_pretrained(config.backbone_name, **backbone_kwargs)
-        self.backbone = AutoModelForSequenceClassification.from_pretrained(config.backbone_name, config=self.backbone_config)
-        self.classifier = nn.Linear(self.backbone_config.hidden_size, 2)
-
-    def forward(self, **input):
-        return self.backbone(**input)
+outputs = model.generate(**inputs, max_new_tokens=40)
+print(tokenizer.decode(outputs[0][inputs["input_ids"].shape[-1]:]))
