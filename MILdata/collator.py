@@ -47,6 +47,7 @@ class MILDataCollator:
             )
             segment_positive_probs = torch.zeros((batch_size, max_segments), dtype=torch.float32)
         document_texts: List[str] = []
+        prompt_texts: List[str] = []
         segment_texts: List[List[str]] = []
 
         for row, item in enumerate(batch):
@@ -60,6 +61,7 @@ class MILDataCollator:
                 shifted = [pos + start if pos >= 0 else -1 for pos in ends]
                 segment_ends[row, : len(ends)] = torch.tensor(shifted, dtype=torch.long)
             document_texts.append(item.get("document_text", ""))
+            prompt_texts.append(item.get("prompt_text", ""))
             segment_text_entries = item.get("segment_texts", [])
             if len(segment_text_entries) != len(item["segment_token_ids"]):
                 raise ValueError("segment_texts must align with segment_token_ids.")
@@ -108,6 +110,7 @@ class MILDataCollator:
                 "source": [item["source"] for item in batch],
                 "granularity": [item["granularity"] for item in batch],
                 "document_texts": document_texts,
+                "prompt_texts": prompt_texts,
                 "segment_texts": segment_texts,
             }
         )

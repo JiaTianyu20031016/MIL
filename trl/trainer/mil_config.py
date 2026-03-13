@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, List
 
 from transformers import TrainingArguments
 
@@ -72,6 +72,10 @@ class MILConfig(_BaseConfig):
 
         activation_offloading (`bool`, *optional*, defaults to `False`):
             Whether to offload the activations to the CPU.
+
+        mil_model_kwargs (`list[str]`, *optional*):
+            In addition to the parameters listed above, this class also accepts any of the parameters that MIL model needs.
+    
     > [!NOTE]
     > These parameters have default values different from [`~transformers.TrainingArguments`]:
     > - `logging_steps`: Defaults to `10` instead of `500`.

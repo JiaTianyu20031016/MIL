@@ -5,7 +5,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
-from transformers import AutoModel, AutoConfig, PretrainedConfig
+from transformers import AutoModel, AutoConfig, PretrainedConfig, AutoModelForCausalLM
 
 from .mil_base import BaseMILModel, MLP, LinearAttention, Batch
 
@@ -395,7 +395,8 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
 
     supported_modules = ("classifier",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, **kwargs):
+    def __init__(self, pretrained_model, decision_threshold=0.5, temperature=1.0, **kwargs):
+        self.temperature = temperature
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
 
     def _init_weights(self, **kwargs):
@@ -440,7 +441,7 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
         positive_probs = segment_probs_grid[..., 1]  # shape [batch, max_segments]
         valid_segment_mask = segment_mask.any(dim=-1)  # shape [batch, max_segments]
         masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask, 1.0)  # treat invalid segments as having max positive probability
-        softmin_weights = torch.softmax(1-masked_positive_probs, dim=1)  # shape [batch, max_segments]
+        softmin_weights = torch.softmax(self.temperature * (1 - masked_positive_probs), dim=1)  # shape [batch, max_segments]
         document_probs = (segment_probs_grid * softmin_weights.unsqueeze(-1)).sum(dim=1)  # shape [batch, classes]
         document_logits = torch.log(document_probs + 1e-6)  # add small constant for numerical stability
 
@@ -508,6 +509,122 @@ class NaiveMILModelforPRM(BaseMILModel):
         }
         return document_probs, segment_probs_grid, extras
 
+
+class BufferBaselineModelforPRM(BaseMILModel):
+    """Feeds segment batches through a pretrained backbone and averages predictions per document."""
+
+    supported_modules = ("classifier",)
+
+    def __init__(self, pretrained_model, decision_threshold=0.5, **kwargs):
+        super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
+
+    def _init_weights(self, **kwargs):
+        hidden_size = self.pretrained_model.config.hidden_size
+        self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
+        self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
+
+    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+        segment_ids: Tensor = batch["segment_input_ids"]
+        segment_mask: Tensor = batch["segment_attention_mask"]
+        document_ids: Tensor = batch["input_ids"]
+        document_mask: Tensor = batch["attention_mask"]
+
+        if segment_ids.dim() != 3 or segment_mask.dim() != 3:
+            raise ValueError("Segment tensors must be 3D with shape [batch, segments, seq_len].")
+
+        batch_size, max_segments, segment_length = segment_ids.shape
+        dtype = self.backbone_dtype
+        device = segment_ids.device
+
+        if max_segments == 0 or segment_length == 0:
+            doc_probs = torch.zeros((batch_size, 2), dtype=dtype, device=device)
+            doc_probs[:, 0] = 1.0
+            empty = torch.zeros((0, 2), dtype=dtype, device=device)
+            return doc_probs, empty, None
+
+        # forward
+        outputs = self.pretrained_model(
+            input_ids=document_ids,
+            attention_mask=document_mask,
+            output_hidden_states=True,
+        )
+
+        # extract segment embeddings at each segment's end position
+        end_positions = batch["segment_ends"]  # shape [batch, max_segments]
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, max_segments)
+        segment_embeddings_grid = outputs.hidden_states[-1][batch_indices, end_positions] # shape [batch, max_segments, hidden]
+        segment_logits_grid = self.classifier(segment_embeddings_grid)    # shape [batch, max_segments, classes]
+        segment_probs_grid = torch.softmax(segment_logits_grid, dim=-1)   # shape [batch, max_segments, classes]
+
+        # document-level prediction by taking last valid segment's prediction
+        last_valid_indices = segment_mask.any(dim=-1).sum(dim=-1) - 1  # shape [batch]
+        batch_indices = torch.arange(batch_size, device=device)
+        document_probs = segment_probs_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
+        document_logits = segment_logits_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
+
+        extras = {
+            "segment_logits": segment_logits_grid,
+            "document_logits": document_logits,
+        }
+        return document_probs, segment_probs_grid, extras
+
+
+class DPOBaselineModelforPRM(BaseMILModel):
+    """Feeds segment batches through a pretrained backbone and averages predictions per document."""
+
+    transformers_parent_class = AutoModelForCausalLM
+    supported_modules = ("ref_model",)
+
+    def __init__(self, pretrained_model, decision_threshold=0.5, **kwargs):
+        super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
+
+    def _init_weights(self, **kwargs):
+        self.ref_model = self.pretrained_model.clone()
+
+    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+        segment_ids: Tensor = batch["segment_input_ids"]
+        segment_mask: Tensor = batch["segment_attention_mask"]
+        document_ids: Tensor = batch["input_ids"]
+        document_mask: Tensor = batch["attention_mask"]
+
+        if segment_ids.dim() != 3 or segment_mask.dim() != 3:
+            raise ValueError("Segment tensors must be 3D with shape [batch, segments, seq_len].")
+
+        batch_size, max_segments, segment_length = segment_ids.shape
+        dtype = self.backbone_dtype
+        device = segment_ids.device
+
+        if max_segments == 0 or segment_length == 0:
+            doc_probs = torch.zeros((batch_size, 2), dtype=dtype, device=device)
+            doc_probs[:, 0] = 1.0
+            empty = torch.zeros((0, 2), dtype=dtype, device=device)
+            return doc_probs, empty, None
+
+        # forward
+        outputs = self.pretrained_model(
+            input_ids=document_ids,
+            attention_mask=document_mask,
+            output_hidden_states=True,
+        )
+
+        # extract segment embeddings at each segment's end position
+        end_positions = batch["segment_ends"]  # shape [batch, max_segments]
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, max_segments)
+        segment_embeddings_grid = outputs.hidden_states[-1][batch_indices, end_positions] # shape [batch, max_segments, hidden]
+        segment_logits_grid = self.classifier(segment_embeddings_grid)    # shape [batch, max_segments, classes]
+        segment_probs_grid = torch.softmax(segment_logits_grid, dim=-1)   # shape [batch, max_segments, classes]
+
+        # document-level prediction by taking last valid segment's prediction
+        last_valid_indices = segment_mask.any(dim=-1).sum(dim=-1) - 1  # shape [batch]
+        batch_indices = torch.arange(batch_size, device=device)
+        document_probs = segment_probs_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
+        document_logits = segment_logits_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
+
+        extras = {
+            "segment_logits": segment_logits_grid,
+            "document_logits": document_logits,
+        }
+        return document_probs, segment_probs_grid, extras
 
 
 __all__ = [

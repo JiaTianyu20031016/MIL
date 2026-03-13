@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICES=4,5 python scripts/run_mil.py --model_name_or_path /data2/Common_LLM_Base/Qwen/Qwen3-Embedding-0.6B/ --dataset_name MILdata/PRM800K/data/data_balanced --output_dir ckpts/debug --per_device_train_batch_size 8 --num_train_epochs 1 --learning_rate 1.0e-5 --eval_strategy steps --eval_steps 50

@@ -417,6 +417,7 @@ class MILTrainer(_BaseTrainer):
 
         # Initialize the metrics
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self._metrics_backup = {}
         self._total_train_tokens = 0
 
         # Add tags to the model
@@ -504,7 +505,7 @@ class MILTrainer(_BaseTrainer):
         propagate the document-level label to segments as noisy labels, and calculate the cross-entropy loss for all segments with valid labels. 
         '''
         segment_pred_probs = outputs.segment_probs[segment_valid_mask]
-        segment_target_prob = document_target_prob.unsqueeze(1).expand_as(outputs.segment_probs)[segment_valid_mask]
+        segment_target_prob = document_target_prob.unsqueeze(1).expand_as(outputs.segment_probs[:,:,0])[segment_valid_mask]
         if segment_target_prob is None or segment_pred_probs.size(0) == 0:
             return None
 
@@ -601,6 +602,7 @@ class MILTrainer(_BaseTrainer):
         if mode == "eval":
             metrics = {f"eval_{key}": val for key, val in metrics.items()}
 
+        self._metrics_backup = metrics  # backup the metrics in case we need to access them later (e.g., in callbacks) after they are cleared
         logs = {**logs, **metrics}
         super().log(logs, start_time)
         self._metrics[mode].clear()
@@ -613,3 +615,9 @@ class MILTrainer(_BaseTrainer):
             model_name = self.args.hub_model_id.split("/")[-1]
         self.create_model_card(model_name=model_name)
         super()._save_checkpoint(model, trial)
+
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix: str = "eval"):
+        metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
+        metrics.update(self._metrics_backup)  # add the metrics calculated in compute_loss to the final metrics returned by evaluate()
+        return metrics

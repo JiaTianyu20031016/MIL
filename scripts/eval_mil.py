@@ -125,9 +125,7 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code, use_fast=True
     )
-    model_class = ARCHITECTURE_TO_MODEL_CLASS.get(training_args.architecture, None)
-    if model_class is None:
-        raise ValueError(f"Unsupported architecture '{training_args.architecture}'. Supported architectures are: {list(ARCHITECTURE_TO_MODEL_CLASS.keys())}")
+    model_class = ARCHITECTURE_TO_MODEL_CLASS.get(training_args.architecture, InstanceAveragePoolMILModelforPRM)
     model = model_class.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code, **model_kwargs
     )
@@ -152,7 +150,7 @@ if __name__ == "__main__":
     # eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
 
     from torch.utils.data import random_split
-    train_dataset, eval_dataset = random_split(train_dataset, [len(train_dataset) - 3000, 3000], generator=torch.Generator().manual_seed(42))
+    train_dataset, eval_dataset = random_split(train_dataset, [len(train_dataset) - 1000, 1000], generator=torch.Generator().manual_seed(42))
     ##########
     # Training
     ##########
@@ -165,17 +163,12 @@ if __name__ == "__main__":
         data_collator=collator,
         peft_config=get_peft_config(model_args),
     )
-    trainer.train()
+    # trainer.train()
 
     ############################
     # Save model and push to Hub
     ############################
-    trainer.save_model(training_args.output_dir)
+    # trainer.save_model(training_args.output_dir)
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
     trainer.save_metrics("eval", metrics)
-
-    # Save and push to hub
-    trainer.save_model(training_args.output_dir)
-    if training_args.push_to_hub:
-        trainer.push_to_hub(dataset_name=script_args.dataset_name)

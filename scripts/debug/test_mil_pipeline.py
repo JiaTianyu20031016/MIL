@@ -22,7 +22,7 @@ from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
 )
-from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM, AttentionPoolMILModelforPRM  # pylint: disable=wrong-import-position
+from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM, AttentionPoolMILModelforPRM, NaiveMILModelforPRM  # pylint: disable=wrong-import-position
 from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-position
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=1024,
+        default=2,
         help="Maximum number of optimizer steps to run (kept very small for testing).",
     )
     parser.add_argument(
@@ -108,9 +108,10 @@ def main() -> None:
     )
     _ensure_padding_token(tokenizer)
 
-    model = AttentionPoolMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
+    model = NaiveMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
 
     training_args = MILConfig(
+        loss_type="segment",
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         per_device_eval_batch_size=args.per_device_batch_size,
@@ -149,7 +150,7 @@ def main() -> None:
         eval_dataset=eval_dataset,
         data_collator=collator,
     )
-    trainer.train(resume_from_checkpoint=True)
+    trainer.train()
 
     train_result = trainer.train()
     logging.info(

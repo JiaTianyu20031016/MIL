@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GPU_IDS="2,3,4,5"
+GPU_IDS="0,1,2,3"
 MODEL_PATH="/data2/Common_LLM_Base/Qwen/Qwen3-4B/"
 DATASET_PATH="MILdata/PRM800K/data/data_balanced"
 DATASET_TRAIN_SPLIT="train"
@@ -66,7 +66,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 
-CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate_configs/zero3.yaml scripts/run_mil.py \
+CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate_configs/zero3.yaml scripts/eval_mil.py \
     --dataset_name "${DATASET_PATH}" \
     --dataset_train_split "${DATASET_TRAIN_SPLIT}" \
     --dataset_test_split "${DATASET_TEST_SPLIT}" \
