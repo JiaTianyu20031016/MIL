@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-GPU_IDS="2,3,4,5"
+GPU_IDS="0,1,2,3"
 MODEL_PATH="/data2/Common_LLM_Base/Qwen/Qwen3-4B/"
+
 DATASET_PATH="MILdata/PRM800K/data/data_balanced"
 DATASET_TRAIN_SPLIT="train"
+EVAL_DATASET_PATH="MILdata/PRM800K/data/data_balanced"
 DATASET_TEST_SPLIT="test"
+
 # DATASET_PATH="peiyi9979/Math-Shepherd"
 # DATASET_TRAIN_SPLIT="math"
+# EVAL_DATASET_PATH="Qwen/ProcessBench"
 # DATASET_TEST_SPLIT="math"
+
 OUTPUT_DIR="ckpts/debug"
 
 LR=1e-5
-EPOCHS=2
+EPOCHS=1
 TRAIN_PER_DEVICE_BS=8
 EVAL_PER_DEVICE_BS=8
 GRAD_ACC=8

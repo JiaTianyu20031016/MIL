@@ -335,8 +335,9 @@ class MinPoolMILModelforPRM(BaseMILModel):
 
     supported_modules = ("classifier",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, **kwargs):
+    def __init__(self, pretrained_model, decision_threshold=0.5, dropout=0.0, **kwargs):
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
+        self.dropout = dropout
 
     def _init_weights(self, **kwargs):
         hidden_size = self.pretrained_model.config.hidden_size
@@ -379,7 +380,9 @@ class MinPoolMILModelforPRM(BaseMILModel):
         # document-level prediction by taking the minimum segment probability for the positive class
         positive_probs = segment_probs_grid[..., 1]  # shape [batch, max_segments]
         valid_segment_mask = segment_mask.any(dim=-1)  # shape [batch, max_segments]
-        masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask, 1.0)  # treat invalid segments as having max positive probability
+        # random dropout of some valid segments during training for regularization (similar to DropBlock)
+        dropout_mask = (torch.rand_like(positive_probs) < self.dropout) & valid_segment_mask  # shape [batch, max_segments]
+        masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask | dropout_mask, 1.0)  # treat invalid segments as having max positive probability
         min_positive_probs, _ = masked_positive_probs.min(dim=1)  # shape [batch]
         document_probs = torch.stack([1 - min_positive_probs, min_positive_probs], dim=-1)  # shape [batch, 2]
         document_logits = torch.log(document_probs + 1e-6)  # add small constant for numerical stability
@@ -395,7 +398,7 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
 
     supported_modules = ("classifier",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, temperature=1.0, **kwargs):
+    def __init__(self, pretrained_model, decision_threshold=0.5, temperature=0.1, **kwargs):
         self.temperature = temperature
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
 
@@ -440,8 +443,8 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
         # document-level prediction by 'soft' minimum segment probability for the positive class
         positive_probs = segment_probs_grid[..., 1]  # shape [batch, max_segments]
         valid_segment_mask = segment_mask.any(dim=-1)  # shape [batch, max_segments]
-        masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask, 1.0)  # treat invalid segments as having max positive probability
-        softmin_weights = torch.softmax(self.temperature * (1 - masked_positive_probs), dim=1)  # shape [batch, max_segments]
+        masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask, torch.inf)  # treat invalid segments as having max positive probability
+        softmin_weights = torch.softmax((1 - masked_positive_probs) / self.temperature, dim=1).detach()  # shape [batch, max_segments]
         document_probs = (segment_probs_grid * softmin_weights.unsqueeze(-1)).sum(dim=1)  # shape [batch, classes]
         document_logits = torch.log(document_probs + 1e-6)  # add small constant for numerical stability
 
@@ -633,5 +636,6 @@ __all__ = [
     "AttentionPoolMILModelforPRM", 
     "ConjucturePoolMILModelforPRM", 
     "MinPoolMILModelforPRM", 
-    "SoftMinPoolMILModelforPRM"
+    "SoftMinPoolMILModelforPRM",
+    "NaiveMILModelforPRM",
 ]

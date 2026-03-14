@@ -554,8 +554,13 @@ class PreTrainedModelWrapper(nn.Module):
             **kwargs (`dict`, *optional*):
                 Keyword arguments passed along to the underlying model's `save_pretrained` method.
         """
-        state_dict = self.state_dict()
-        # even if the state_dict is passed in as a kwarg, we override it to make sure that the correct state_dict is saved.
+        state_dict = kwargs.get("state_dict", None)
+        if state_dict is None:
+            state_dict = self.state_dict()
+        else:
+            for key in list(self.pretrained_model.state_dict().keys()):
+                if f"pretrained_model.{key}" in state_dict:
+                    state_dict[key] = state_dict.pop(f"pretrained_model.{key}")
         kwargs["state_dict"] = state_dict
 
         # if it is a peft model only save the `v_head` state_dict and

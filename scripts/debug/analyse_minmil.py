@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
+from MILdata.shepherd.dataset import (  # pylint: disable=wrong-import-position
     TokenizedDocumentDataset,
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
@@ -29,13 +29,14 @@ from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-p
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
 
-DEFAULT_BACKBONE = "ckpts/Qwen3-4B-min-document-math"
+DEFAULT_BACKBONE = "ckpts/shepherd/Qwen3-4B-min-document-math"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset", 
-        default="MILdata/PRM800K/data/data_balanced", 
+        default="peiyi9979/Math-Shepherd", 
         help="Name of the MIL dataset to load."
     )
     parser.add_argument(

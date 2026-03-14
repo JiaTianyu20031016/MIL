@@ -51,16 +51,14 @@ from trl.trainer.mil_trainer import MILTrainer
 from trl.trainer.mil_config import MILConfig
 
 from MILdata.collator import MILDataCollator
-from MILdata.PRM800K.dataset import (
+from MILdata.dataset_common import (
     TokenizedDocumentDataset,
-    create_mil_data_collator,
-    load_dataset as load_mil_dataset,
+    create_mil_data_collator
 )
-# from MILdata.shepherd.dataset import (
-#     TokenizedDocumentDataset,
-#     create_mil_data_collator,
-#     load_dataset as load_mil_dataset,
-# )
+from MILdata.ProcessBench.dataset import load_dataset as load_process_bench_dataset
+from MILdata.PRM800K.dataset import load_dataset as load_prm800k_dataset
+from MILdata.shepherd.dataset import load_dataset as load_math_shepherd_dataset
+
 from MILmodel.mil_model_for_prm import *
 
 logger = logging.get_logger(__name__)
@@ -72,8 +70,8 @@ ARCHITECTURE_TO_MODEL_CLASS = {
     "ConjucturePoolMILModelforPRM": ConjucturePoolMILModelforPRM,
     "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
     "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
+    "NaiveMILModelforPRM": NaiveMILModelforPRM
 }
-
 
 # Enable logging in a Hugging Face Space
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
@@ -125,7 +123,9 @@ if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code, use_fast=True
     )
-    model_class = ARCHITECTURE_TO_MODEL_CLASS.get(training_args.architecture, InstanceAveragePoolMILModelforPRM)
+    model_class = ARCHITECTURE_TO_MODEL_CLASS.get(training_args.architecture, None)
+    if model_class is None:
+        raise ValueError(f"Unsupported architecture '{training_args.architecture}'. Supported architectures are: {list(ARCHITECTURE_TO_MODEL_CLASS.keys())}")
     model = model_class.from_pretrained(
         model_args.model_name_or_path, trust_remote_code=model_args.trust_remote_code, **model_kwargs
     )
@@ -143,14 +143,24 @@ if __name__ == "__main__":
     ##############
     collator = create_mil_data_collator(tokenizer)
 
-    samples = load_mil_dataset(hf_dataset=script_args.dataset_name, split=script_args.dataset_train_split)
-    train_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    def load_dataset_fn(name, split):
+        if 'shepherd' in name.lower():
+            return load_math_shepherd_dataset(hf_dataset=name, split=split)
+        elif 'prm800k' in name.lower():
+            return load_prm800k_dataset(hf_dataset=name, split=split)
+        elif 'processbench' in name.lower():
+            return load_process_bench_dataset(hf_dataset=name, split=split)
+        else:
+            raise ValueError(f"Unsupported dataset '{name}'. Supported datasets are those containing 'shepherd' or 'prm800k' in their name.")
     
-    # samples = load_mil_dataset(hf_dataset=script_args.dataset_name, split=script_args.dataset_test_split)
-    # eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    import random
+    random.seed(42)
 
-    from torch.utils.data import random_split
-    train_dataset, eval_dataset = random_split(train_dataset, [len(train_dataset) - 1000, 1000], generator=torch.Generator().manual_seed(42))
+    eval_dataset_name = script_args.eval_dataset_name if script_args.eval_dataset_name else script_args.dataset_name
+    eval_samples = load_dataset_fn(name=eval_dataset_name, split=script_args.dataset_test_split)
+    random.shuffle(eval_samples)
+    eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer)
+
     ##########
     # Training
     ##########
@@ -158,17 +168,11 @@ if __name__ == "__main__":
         model=model,
         processing_class=tokenizer,
         args=training_args,
-        train_dataset=train_dataset,
+        train_dataset=eval_dataset,  # We won't actually train, but MILTrainer requires a train_dataset for initialization. Using eval_dataset as a placeholder.
         eval_dataset=eval_dataset,
         data_collator=collator,
         peft_config=get_peft_config(model_args),
     )
-    # trainer.train()
 
-    ############################
-    # Save model and push to Hub
-    ############################
-    # trainer.save_model(training_args.output_dir)
     metrics = trainer.evaluate()
     trainer.log_metrics("eval", metrics)
-    trainer.save_metrics("eval", metrics)

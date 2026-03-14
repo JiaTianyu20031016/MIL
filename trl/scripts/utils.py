@@ -139,6 +139,8 @@ class ScriptArguments:
     Args:
         dataset_name (`str`,, *optional*):
             Path or name of the dataset to load. If `datasets` is provided, this will be ignored.
+        eval_dataset_name (`str`, *optional*):
+            Path or name of the dataset to use for evaluation. If this is not provided, `dataset_name` will be used for evaluation as well.
         dataset_config (`str`, *optional*):
             Dataset configuration name. Corresponds to the `name` argument of the [`~datasets.load_dataset`] function.
             If `datasets` is provided, this will be ignored.
@@ -158,6 +160,12 @@ class ScriptArguments:
     dataset_name: str | None = field(
         default=None,
         metadata={"help": "Path or name of the dataset to load. If `datasets` is provided, this will be ignored."},
+    )
+    eval_dataset_name: str | None = field(
+        default=None,
+        metadata={
+            "help": "Path or name of the dataset to use for evaluation. If this is not provided, `dataset_name` will be used for evaluation as well."
+        },
     )
     dataset_config: str | None = field(
         default=None,
