@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=2,
+        default=10,
         help="Maximum number of optimizer steps to run (kept very small for testing).",
     )
     parser.add_argument(
@@ -123,9 +123,10 @@ def main() -> None:
         report_to=[],
         remove_unused_columns=False,
         gradient_checkpointing=False,
-        bf16=False,
+        bf16=True,
         fp16=False,
         dataloader_pin_memory=False,
+        annotation_output='ckpts'
     )
 
     ##############

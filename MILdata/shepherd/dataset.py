@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, Iterable, List, Literal, Optional, Tuple
-from datasets import disable_caching
+from datasets import disable_caching, concatenate_datasets
 
 disable_caching()
 
@@ -106,23 +106,46 @@ def load_dataset(
 
 def _parse_dataset_split(
     *,
-    split_name: Literal["gsm8k", "math"],
+    split_name: Literal["gsm8k", "math", "gsm8k_balanced", "math_balanced", "*"],
     dataset_id: str,
     config_name: Optional[str],
     source: Literal["math-shepherd/gsm8k", "math-shepherd/math"],
     granularity: Literal["step"],
 ) -> Iterable[DocumentSample]:
+    assert split_name in {"gsm8k", "math", "gsm8k_balanced", "math_balanced", "*"}, f"Invalid split name: {split_name}"
+
     split = load_hf_split(
         split_name="train",
         dataset_id=dataset_id,
         config_name=config_name,
     )
-    # filter the dataset according to the 'task' column
-    filtered_split = split.filter(lambda record: record["task"].lower() == split_name)
-    split = filtered_split.map(add_prompt_completions_labels)
-    split = split.filter(lambda record: not record[_SKIP_FIELD])
-    split = split.remove_columns(_SKIP_FIELD)
+    if split_name != "*":
+        # filter the dataset according to the 'task' column
+        if split_name.endswith("_balanced"):
+            base_name = split_name.rsplit("_", 1)[0]
+            filtered_split = split.filter(lambda record: record["task"].lower() == base_name)
+        else:
+            filtered_split = split.filter(lambda record: record["task"].lower() == split_name)
+        
+        # add the prompt/completions/labels columns, and filter out any records that failed to parse
+        split = filtered_split.map(add_prompt_completions_labels)
+        split = split.filter(lambda record: not record[_SKIP_FIELD])
+        split = split.remove_columns(_SKIP_FIELD)
 
+        # If the split name ends with "_balanced", balance the dataset by correctness of the final step
+        if split_name.endswith("_balanced"):
+            correct = split.filter(lambda example: example["labels"][-1] == 1)
+            incorrect = split.filter(lambda example: example["labels"][-1] == 0)
+
+            min_size = min(len(correct), len(incorrect))
+            if min_size == 0:
+                raise ValueError("Cannot balance split because one of the classes is empty.")
+
+            correct = correct.shuffle(seed=42).select(range(min_size))
+            incorrect = incorrect.shuffle(seed=42).select(range(min_size))
+            split = concatenate_datasets([correct, incorrect]).shuffle(seed=42)
+
+    # Finally, convert each record into a DocumentSample
     for idx, record in enumerate(split):
         completions = record['completions']
         labels = record['labels']

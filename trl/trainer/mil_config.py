@@ -69,12 +69,14 @@ class MILConfig(_BaseConfig):
             The architecture of the MIL model to use. If not specified, defaults to `InstanceAveragePoolMILModelForPRM`.
         loss_type (`str`, *optional*, defaults to `"document"`):
             The type of loss to use for training. Supported values are `"document"`, `"segment"` and `"noisy_segment"`.
-
-        activation_offloading (`bool`, *optional*, defaults to `False`):
-            Whether to offload the activations to the CPU.
-
         mil_model_kwargs (`list[str]`, *optional*):
             In addition to the parameters listed above, this class also accepts any of the parameters that MIL model needs.
+        pu_warmup_steps (`int`, *optional*, defaults to `0`):
+            Number of steps to warmup. This is only applicable when using Positive-Unlabeled (PU) learning.
+        annotation_output (`str`, *optional*, defaults to `None`):
+            Path to save the annotated output.
+        activation_offloading (`bool`, *optional*, defaults to `False`):
+            Whether to offload the activations to the CPU.
     
     > [!NOTE]
     > These parameters have default values different from [`~transformers.TrainingArguments`]:
@@ -164,4 +166,16 @@ class MILConfig(_BaseConfig):
     loss_type: str = field(
         default="document",
         metadata={"help": "The type of loss to use for training. Supported values are `document`, `segment` and `noisy_segment`."},
+    )
+    pu_warmup_steps: int = field(
+        default=0,
+        metadata={"help": "Number of steps to warmup. This is only applicable when using Positive-Unlabeled (PU) learning."},
+    )
+    annotation_output: str | None = field(
+        default=None,
+        metadata={"help": "Path to save the annotated output."},
+    )
+    mil_model_kwargs: List[str] = field(
+        default_factory=list,
+        metadata={"help": "In addition to the parameters listed above, this class also accepts any of the parameters that MIL model needs."},
     )

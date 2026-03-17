@@ -148,3 +148,4 @@ wandb/
 MILdata/PRM800K/data/
 MILdata/sentiment/data/
 ckpts/
+scripts/debug/

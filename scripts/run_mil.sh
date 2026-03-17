@@ -26,6 +26,7 @@ SAVE_STRATEGY="epoch"
 
 ARCHITECTURE="InstanceAveragePoolMILModelforPRM"
 LOSS="document"
+WARMUP=0
 
 # Parse CLI overrides: allow KEY=VALUE or --key value (keys mapped to UPPERCASE, dashes -> underscores)
 print_usage() {
@@ -73,11 +74,13 @@ done
 
 CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate_configs/zero3.yaml scripts/run_mil.py \
     --dataset_name "${DATASET_PATH}" \
+    --eval_dataset_name "${EVAL_DATASET_PATH}" \
     --dataset_train_split "${DATASET_TRAIN_SPLIT}" \
     --dataset_test_split "${DATASET_TEST_SPLIT}" \
     --model_name_or_path "${MODEL_PATH}" \
     --architecture "${ARCHITECTURE}" \
     --loss_type "${LOSS}" \
+    --pu_warmup_steps "${WARMUP}" \
     --learning_rate "${LR}" \
     --num_train_epochs "${EPOCHS}" \
     --per_device_train_batch_size "${TRAIN_PER_DEVICE_BS}" \

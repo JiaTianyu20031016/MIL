@@ -423,7 +423,12 @@ class MILTrainer(_BaseTrainer):
         # Add tags to the model
         self.model.add_model_tags(self._tag_names)
 
+        # loss type: "document" for document-level loss only, "segment" for segment-level loss only, "noisy_segment" for using document-level labels as noisy labels for segments, and "pgpu_document" for using PGPU relabeling for document-level loss.
         self.loss_type = args.loss_type
+        # PU warmup steps for PGPU relabeling. During the warmup period, no relabeling will be applied to allow the model to learn from the original labels first. After the warmup period, PGPU relabeling will be applied to potentially noisy positive samples to reduce the noise in the labels and improve the model's robustness. The optimal value for this hyperparameter may depend on the dataset and task, and can be tuned based on validation performance.
+        self.pu_warmup_steps = args.pu_warmup_steps
+        # if annotation_output is True, will record model's prediction for each sample in the eval dataset and save to disk for analysis. This is useful for understanding the model's behavior and diagnosing potential issues with the training data or model architecture.
+        self.annotation_output = args.annotation_output
 
 
     def _prepare_dataset(
@@ -516,6 +521,42 @@ class MILTrainer(_BaseTrainer):
         loss = -(target_matrix * log_probs).sum(dim=-1).mean()
         return loss
 
+    def pgpu_document_loss(self, outputs: MILModelOutput, document_target_prob: torch.Tensor) -> torch.Tensor:
+        '''
+        binary classification loss for document-level prediction, using PGPU (Probability Gap Positive Unlabeled Learning) for relabeling.
+        '''
+        metrics = {}
+
+        document_pred_probs = outputs.document_probs
+        if document_target_prob is None or document_pred_probs.size(0) == 0:
+            return None, None
+        
+        # PGPU relabeling: for (potentially noisy) positive documents with observed probability gap < 0, the true probability gap must be lower than observed
+        # so we can relabel the positive document with low predicted probability as negative to reduce the noise in the labels.
+        if self.state.global_step > self.pu_warmup_steps:
+            pgpu_relabel_mask = (document_pred_probs[:,1] < 0.5) & (document_target_prob == 1)  # shape: (batch_size,)
+        else:
+            pgpu_relabel_mask = torch.zeros_like(document_target_prob, dtype=torch.bool)
+        
+        target = document_target_prob.to(document_pred_probs.device, dtype=document_pred_probs.dtype)
+        target = target.clamp(0.0, 1.0)
+        target_matrix = torch.stack([1.0 - target, target], dim=-1)
+        log_probs = torch.log(document_pred_probs.clamp_min(1e-8))
+        loss = -(target_matrix * log_probs).masked_fill(pgpu_relabel_mask.unsqueeze(-1), 0).sum(dim=-1).mean()
+        
+        if (document_target_prob == 1).any():
+            metrics["pgpu_relabel_ratio"] = pgpu_relabel_mask.float().mean().item() / (document_target_prob == 1).float().mean().item()
+        return loss, metrics
+    
+    def pad_and_gather_for_metrics(self, tensor: torch.Tensor, pad_dim: int = 0, pad_value: int = 0) -> torch.Tensor:
+        # Pad the tensor to the same length across all processes before gathering for metrics calculation. This is needed for segment-level predictions since different processes may have different max_segments due to dynamic padding.
+        max_length = self.accelerator.gather_for_metrics(torch.tensor(tensor.shape[pad_dim], device=tensor.device)).max().item()
+        if tensor.shape[pad_dim] < max_length:
+            pad_sizes = [(0, 0)] * len(tensor.shape)
+            pad_sizes[pad_dim] = (0, max_length - tensor.shape[pad_dim])
+            tensor = torch.nn.functional.pad(tensor, [size for pair in reversed(pad_sizes) for size in pair], value=pad_value)
+        return self.accelerator.gather_for_metrics(tensor)
+
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         mode = "train" if self.model.training else "eval"
@@ -527,64 +568,136 @@ class MILTrainer(_BaseTrainer):
         document_target_prob = inputs.get("positive_prob")
         segment_target_prob = inputs.get("segment_positive_probs")
         segment_valid_mask = inputs.get("segment_attention_mask").any(dim=-1)
+        assert document_target_prob is not None and segment_target_prob is not None and segment_valid_mask is not None
+        assert segment_valid_mask.any(dim=-1).all()
+
         if self.loss_type == "noisy_segment":
             loss = self.noisy_segment_loss(outputs, document_target_prob, segment_valid_mask)
         elif self.loss_type == "document":
             loss = self.document_loss(outputs, document_target_prob)
         elif self.loss_type == "segment":
             loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
+        elif self.loss_type == "pgpu_document":
+            loss, pgpu_metrics = self.pgpu_document_loss(outputs, document_target_prob)
+            for key, value in pgpu_metrics.items():
+                self._metrics[mode][key].append(value)
         else:
             raise ValueError(f"Invalid loss_type: {self.loss_type}. Supported values are 'document', 'segment', and 'noisy_segment'.")
         
         # metrics
         with torch.no_grad():
-            if document_target_prob is not None:
-                document_loss = self.document_loss(outputs, document_target_prob)
-                self._metrics[mode]["document_loss"].append(document_loss.item())
-            if segment_target_prob is not None:
-                segment_loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
-                self._metrics[mode]["segment_loss"].append(segment_loss.item())
+            document_loss = self.document_loss(outputs, document_target_prob)
+            self._metrics[mode]["document_loss"].append(
+                self.accelerator.gather_for_metrics(document_loss).mean().item()
+            )
+            segment_loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
+            self._metrics[mode]["segment_loss"].append(
+                self.accelerator.gather_for_metrics(segment_loss).mean().item()
+            )
 
-            document_pred_labels = outputs.document_predictions.long()  # (batch_size,)
-            segment_pred_labels = outputs.segment_predictions.long()    # (batch_size, max_segments)
-            document_target_labels = (document_target_prob >= 0.5).long()
-            segment_target_labels = (segment_target_prob >= 0.5).long()
-            if document_target_prob is not None:
-                # document level prediction accuracy
-                self._metrics[mode]["document_accuracy"].append((document_pred_labels == document_target_labels).float().mean().item())
-                if torch.any(document_target_labels == 1):
-                    self._metrics[mode]["document_positive_accuracy"].append(((document_pred_labels == 1) & (document_target_labels == 1)).float().sum().item() / (document_target_labels == 1).float().sum().item())
-                if torch.any(document_target_labels == 0):
-                    self._metrics[mode]["document_negative_accuracy"].append(((document_pred_labels == 0) & (document_target_labels == 0)).float().sum().item() / (document_target_labels == 0).float().sum().item())
-            if segment_target_prob is not None and segment_valid_mask.sum() > 0:
-                # segement level prediction accuracy
-                self._metrics[mode]["segment_accuracy"].append((segment_pred_labels[segment_valid_mask] == segment_target_labels[segment_valid_mask]).float().mean().item())
-                if torch.any(segment_target_labels[segment_valid_mask] == 1):
-                    self._metrics[mode]["segment_positive_accuracy"].append(((segment_pred_labels[segment_valid_mask] == 1) & (segment_target_labels[segment_valid_mask] == 1)).float().sum().item() / (segment_target_labels[segment_valid_mask] == 1).float().sum().item())
-                if torch.any(segment_target_labels[segment_valid_mask] == 0):   
-                    self._metrics[mode]["segment_negative_accuracy"].append(((segment_pred_labels[segment_valid_mask] == 0) & (segment_target_labels[segment_valid_mask] == 0)).float().sum().item() / (segment_target_labels[segment_valid_mask] == 0).float().sum().item())
-            if document_target_prob is not None and segment_target_prob is not None and segment_valid_mask.sum() > 0:
-                # first-error detection accuracy: whether the model can correctly identify the first error segment. using F1 score
-                seq_indices = torch.arange(segment_pred_labels.size(1), device=segment_pred_labels.device)
-                seq_indices = seq_indices.unsqueeze(0).expand(segment_pred_labels.size(0), -1)
-                sentinel = segment_pred_labels.size(-1)
-                first_error_pred = torch.where(
-                    ((segment_pred_labels == 0) & segment_valid_mask), seq_indices, sentinel
-                ).min(dim=-1).values
-                first_error_target = torch.where(
-                    ((segment_target_labels == 0) & segment_valid_mask), seq_indices, sentinel
-                ).min(dim=-1).values
-                positive_document_mask = document_target_labels == 1
-                if positive_document_mask.any():
-                    true_positives = ((first_error_pred == first_error_target) & positive_document_mask).float().sum().item()
-                    error_detection_positive_accuracy = true_positives / (positive_document_mask).float().sum().item()
-                    self._metrics[mode]["error_detection_positive_accuracy"].append(error_detection_positive_accuracy)
-                if not positive_document_mask.all():
-                    true_negatives = ((first_error_pred == first_error_target) & ~positive_document_mask).float().sum().item()
-                    error_detection_negative_accuracy = true_negatives / (~positive_document_mask).float().sum().item()
-                    self._metrics[mode]["error_detection_negative_accuracy"].append(error_detection_negative_accuracy)
-                if positive_document_mask.any() and not positive_document_mask.all():
-                    self._metrics[mode]["error_detection_f1"].append(200 * error_detection_positive_accuracy * error_detection_negative_accuracy / (error_detection_positive_accuracy + error_detection_negative_accuracy + 1e-8))
+            # gather results across ranks for calculating metrics
+            document_pred_labels = self.accelerator.gather_for_metrics(outputs.document_predictions).long()  # (batch_size,)
+            document_target_labels = self.accelerator.gather_for_metrics((document_target_prob >= 0.5).long())  # (batch_size,)
+            segment_pred_labels = self.pad_and_gather_for_metrics(outputs.segment_predictions, pad_dim=1, pad_value=0).long()    # (batch_size, max_segments)
+            segment_target_labels = self.pad_and_gather_for_metrics((segment_target_prob >= 0.5).long(), pad_dim=1, pad_value=0)  # (batch_size, max_segments)
+            segment_valid_mask = self.pad_and_gather_for_metrics(segment_valid_mask, pad_dim=1, pad_value=0)  # (batch_size, max_segments)
+
+            document_accuracies = (document_pred_labels == document_target_labels).float()
+            document_positive_mask = document_target_labels == 1
+            segment_accuracies = (segment_pred_labels[segment_valid_mask] == segment_target_labels[segment_valid_mask]).float()
+            segment_positive_mask = segment_target_labels[segment_valid_mask] == 1
+
+            # document level prediction accuracy
+            self._metrics[mode]["document_accuracy"].append(
+                document_accuracies.mean().item()
+            )
+            if torch.any(document_positive_mask):
+                self._metrics[mode]["document_positive_accuracy"].append(
+                    document_accuracies[document_positive_mask].mean().item()
+                )
+            if torch.any(~document_positive_mask):
+                self._metrics[mode]["document_negative_accuracy"].append(
+                    document_accuracies[~document_positive_mask].mean().item()
+                )
+
+            # segement level prediction accuracy
+            self._metrics[mode]["segment_accuracy"].append(
+                segment_accuracies.mean().item()
+            )
+            if torch.any(segment_positive_mask):
+                self._metrics[mode]["segment_positive_accuracy"].append(
+                    segment_accuracies[segment_positive_mask].mean().item()
+                )
+            if torch.any(~segment_positive_mask):
+                self._metrics[mode]["segment_negative_accuracy"].append(
+                    segment_accuracies[~segment_positive_mask].mean().item()
+                )
+
+            # first-error detection accuracy: whether the model can correctly identify the first error segment. using F1 score
+            seq_indices = torch.arange(segment_pred_labels.size(1), device=segment_pred_labels.device)
+            seq_indices = seq_indices.unsqueeze(0).expand(segment_pred_labels.size(0), -1)
+            sentinel = segment_pred_labels.size(-1)
+            first_error_pred = torch.where(
+                ((segment_pred_labels == 0) & segment_valid_mask), seq_indices, sentinel
+            ).min(dim=-1).values
+            first_error_target = torch.where(
+                ((segment_target_labels == 0) & segment_valid_mask), seq_indices, sentinel
+            ).min(dim=-1).values
+            first_error_accuracies = (first_error_pred == first_error_target).float()
+            if torch.any(document_positive_mask):
+                error_detection_positive_accuracy = first_error_accuracies[document_positive_mask].mean().item()
+                self._metrics[mode]["error_detection_positive_accuracy"].append(
+                    error_detection_positive_accuracy
+                )
+            if torch.any(~document_positive_mask):
+                error_detection_negative_accuracy = first_error_accuracies[~document_positive_mask].mean().item()
+                self._metrics[mode]["error_detection_negative_accuracy"].append(
+                    error_detection_negative_accuracy
+                )
+            if torch.any(document_positive_mask) and not torch.all(document_positive_mask):
+                self._metrics[mode]["error_detection_f1"].append(
+                    200 * error_detection_positive_accuracy * error_detection_negative_accuracy / (error_detection_positive_accuracy + error_detection_negative_accuracy + 1e-8)
+                )
+
+        # dump the model predictions for analysis if annotation_output is set
+        if self.annotation_output is not None:
+            from accelerate.utils import gather_object
+            doc_ids = gather_object(inputs.get("doc_ids"))
+            prompts = gather_object(inputs.get("prompt_texts"))
+            completions = gather_object(inputs.get("segment_texts"))
+            sources = gather_object(inputs.get("source"))
+            document_annotations = document_pred_labels.tolist()
+            segment_labels = segment_target_labels.tolist()
+            segment_num = segment_valid_mask.sum(dim=-1).tolist()
+            segment_labels = [labels[:num] for labels, num in zip(segment_labels, segment_num)]
+            annotation_data = [
+                {
+                    "id": doc_ids[i],
+                    "prompt": (
+                        prompts[i] 
+                        if not prompts[i].endswith(self.args.step_separator) 
+                        else prompts[i][:-len(self.args.step_separator)]
+                    ),
+                    "completions": [
+                        (
+                            c 
+                            if not c.endswith(self.args.step_separator) 
+                            else c[:-len(self.args.step_separator)] 
+                        )
+                        for c in  completions[i]
+                    ],
+                    "annotation": document_annotations[i],
+                    "labels": segment_labels[i],
+                    "source": sources[i],
+                }
+                for i in range(len(doc_ids))
+            ]
+            if self.accelerator.is_main_process:
+                annotation_output_path = os.path.join(self.annotation_output, f"{mode}_annotations.jsonl")
+                os.makedirs(self.annotation_output, exist_ok=True)
+                with open(annotation_output_path, "a", encoding="utf-8") as f:
+                    for record in annotation_data:
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         return (loss, outputs) if return_outputs else loss
 

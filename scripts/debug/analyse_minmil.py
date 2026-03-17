@@ -19,30 +19,50 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from MILdata.shepherd.dataset import (  # pylint: disable=wrong-import-position
-    TokenizedDocumentDataset,
-    create_mil_data_collator,
-    load_dataset as load_mil_dataset,
-)
-from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM, AttentionPoolMILModelforPRM, NaiveMILModelforPRM, MinPoolMILModelforPRM  # pylint: disable=wrong-import-position
+from MILdata.dataset_common import TokenizedDocumentDataset, create_mil_data_collator  # pylint: disable=wrong-import-position
+from MILdata.shepherd.dataset import load_dataset as load_shepherd_dataset  # pylint: disable=wrong-import-position
+from MILdata.ProcessBench.dataset import load_dataset as load_process_bench_dataset  # pylint: disable=wrong-import-position
+from MILdata.PRM800K.dataset import load_dataset as load_prm800k_dataset  # pylint: disable=wrong-import-position
+
+from MILmodel.mil_model_for_prm import *
 from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-position
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
 
-DEFAULT_BACKBONE = "ckpts/shepherd/Qwen3-4B-min-document-math"
+DEFAULT_BACKBONE = "ckpts/shepherd/Qwen3-4B-naive-document-math/checkpoint-1064"
 
+ARCHITECTURE_TO_MODEL_CLASS = {
+    "ProbAveragePoolMILModelforPRM": ProbAveragePoolMILModelforPRM,
+    "InstanceAveragePoolMILModelforPRM": InstanceAveragePoolMILModelforPRM,
+    "AttentionPoolMILModelforPRM": AttentionPoolMILModelforPRM,
+    "ConjucturePoolMILModelforPRM": ConjucturePoolMILModelforPRM,
+    "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
+    "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
+    "NaiveMILModelforPRM": NaiveMILModelforPRM
+}
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset", 
-        default="peiyi9979/Math-Shepherd", 
+        default="Qwen/ProcessBench", 
         help="Name of the MIL dataset to load."
+    )
+    parser.add_argument(
+        "--split",
+        default="math",
+        help="Which dataset split to load (e.g. 'train', 'validation', or 'test').",
     )
     parser.add_argument(
         "--backbone",
         default=DEFAULT_BACKBONE,
         help="Path or model ID of the transformer backbone used by SimpleMILModel.",
+    )
+    parser.add_argument(
+        "--architecture",
+        choices=list(ARCHITECTURE_TO_MODEL_CLASS.keys()),
+        default="NaiveMILModelforPRM",
+        help="Which MIL architecture to use for the backbone model.",
     )
     parser.add_argument(
         "--limit",
@@ -51,22 +71,16 @@ def parse_args() -> argparse.Namespace:
         help="Number of documents to keep for the smoke test (0 = all).",
     )
     parser.add_argument(
-        "--max-length",
-        type=int,
-        default=4096,
-        help="Maximum number of tokens per flattened document sequence.",
-    )
-    parser.add_argument(
-        "--per-device-batch-size",
+        "--batch-size",
         type=int,
         default=8,
-        help="Per-device batch size used by the trainer.",
+        help="Per-device batch size used by the dataloader.",
     )
     parser.add_argument(
-        "--max-steps",
+        "--num_workers",
         type=int,
-        default=2,
-        help="Maximum number of optimizer steps to run (kept very small for testing).",
+        default=8,
+        help="Number of worker processes for the dataloader.",
     )
     parser.add_argument(
         "--output-dir",
@@ -74,20 +88,17 @@ def parse_args() -> argparse.Namespace:
         help="Where to store trainer outputs/checkpoints.",
     )
     parser.add_argument(
+        "--filter-mode",
+        choices=["all", "correct", "incorrect"],
+        default="all",
+        help="Whether to include all segments or only those from documents where the gt label is correct/incorrect.",
+    )
+    parser.add_argument(
         "--trust-remote-code",
         action="store_true",
-        help="Forward trust_remote_code to AutoTokenizer.from_pretrained().",
+        help="Whether to allow loading custom code from the model repository. Only enable this if you trust the source of the model.",
     )
     return parser.parse_args()
-
-
-def _prepare_samples(name: str, split: str, limit: int | None = None) -> Sequence:
-    samples = load_mil_dataset(hf_dataset=name, split=split)
-    if limit and limit > 0:
-        samples = samples[:limit]
-    if not samples:
-        raise ValueError("Dataset slice is empty; increase --limit or choose another dataset.")
-    return samples
 
 
 def _ensure_padding_token(tokenizer: AutoTokenizer) -> None:
@@ -119,13 +130,16 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logging.info("Using device: %s", device)
 
+    ##############
+    # Load model and tokenizer
+    ##############
     tokenizer = AutoTokenizer.from_pretrained(
         args.backbone,
         trust_remote_code=args.trust_remote_code,
     )
     _ensure_padding_token(tokenizer)
 
-    model = MinPoolMILModelforPRM.from_pretrained(
+    model = ARCHITECTURE_TO_MODEL_CLASS[args.architecture].from_pretrained(
         args.backbone,
         trust_remote_code=args.trust_remote_code,
     ).to(device)
@@ -135,15 +149,27 @@ def main() -> None:
     ##############
     collator = create_mil_data_collator(tokenizer)
 
-    samples = load_mil_dataset(hf_dataset=args.dataset, split="train")[:args.limit]
-    train_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    def load_dataset_fn(name, split):
+        if 'shepherd' in name.lower():
+            return load_shepherd_dataset(hf_dataset=name, split=split)
+        elif 'prm800k' in name.lower():
+            return load_prm800k_dataset(hf_dataset=name, split=split)
+        elif 'processbench' in name.lower():
+            return load_process_bench_dataset(hf_dataset=name, split=split)
+        else:
+            raise ValueError(f"Unsupported dataset '{name}'. Supported datasets are those containing 'shepherd' or 'prm800k' in their name.")
+
+    import random
+    samples = load_dataset_fn(name=args.dataset, split=args.split)
+    random.shuffle(samples)
+    train_dataset = TokenizedDocumentDataset(samples[:args.limit], tokenizer=tokenizer)
 
     dataloader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=8,
+        batch_size=args.batch_size,
         shuffle=True,
         collate_fn=collator,
-        num_workers=8,  # Set >0 for real training; 0 is simpler for debugging
+        num_workers=args.num_workers  # Set >0 for real training; 0 is simpler for debugging
     )
 
     num_bins = 20
@@ -158,7 +184,20 @@ def main() -> None:
             outputs = model(**inputs)
             segment_target_prob = inputs.get("segment_positive_probs")  # batch_size x num_segments
             segment_valid_mask = inputs.get("segment_attention_mask").any(dim=-1)   # batch_size x num_segments
-            segment_pred_probs = outputs.segment_probs[:, :, 0].detach()   # batch_size x num_segments
+            segment_pred_probs = outputs.segment_probs[:, :, 1].detach()   # batch_size x num_segments
+            document_target_prob = inputs.get("positive_prob")  # batch_size
+            if document_target_prob is None:
+                raise ValueError("positive_prob is missing; cannot filter documents by target label.")
+
+            if args.filter_mode == "correct":
+                zero_label_mask = (document_target_prob == 1)
+            elif args.filter_mode == "incorrect":
+                zero_label_mask = (document_target_prob == 0)
+            else:  # "all"
+                zero_label_mask = torch.ones_like(document_target_prob, dtype=torch.bool)
+            if not zero_label_mask.any().item():
+                continue
+            segment_valid_mask = segment_valid_mask & zero_label_mask.unsqueeze(1)
 
             # Skip batches where no valid segments are present
             if not segment_valid_mask.any().item():
