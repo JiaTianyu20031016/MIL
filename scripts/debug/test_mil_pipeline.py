@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--limit",
         type=int,
-        default=1024,
+        default=30,
         help="Number of documents to keep for the smoke test (0 = all).",
     )
     parser.add_argument(
@@ -134,10 +134,10 @@ def main() -> None:
     ##############
     collator = create_mil_data_collator(tokenizer)
 
-    samples = load_mil_dataset(hf_dataset=args.dataset, split="train")
+    samples = load_mil_dataset(hf_dataset=args.dataset, split="train")[:args.limit]
     train_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
     
-    samples = load_mil_dataset(hf_dataset=args.dataset, split="test")
+    samples = load_mil_dataset(hf_dataset=args.dataset, split="test")[:args.limit]
     eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
 
     ##########

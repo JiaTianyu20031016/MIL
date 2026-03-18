@@ -670,6 +670,8 @@ class MILTrainer(_BaseTrainer):
             segment_labels = segment_target_labels.tolist()
             segment_num = segment_valid_mask.sum(dim=-1).tolist()
             segment_labels = [labels[:num] for labels, num in zip(segment_labels, segment_num)]
+            # note that the length of document_annotations and segment_labels may be smaller than doc_ids, prompts, and completions since the inputs may be padded for distributed training
+            # the padding occurs in the end of the batch, so we can simply ignore the extra samples after the length of document_annotations and segment_labels
             annotation_data = [
                 {
                     "id": doc_ids[i],
@@ -690,7 +692,7 @@ class MILTrainer(_BaseTrainer):
                     "labels": segment_labels[i],
                     "source": sources[i],
                 }
-                for i in range(len(doc_ids))
+                for i in range(len(document_annotations))
             ]
             if self.accelerator.is_main_process:
                 annotation_output_path = os.path.join(self.annotation_output, f"{mode}_annotations.jsonl")

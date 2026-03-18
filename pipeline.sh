@@ -1,7 +1,6 @@
 bash scripts/run_mil.sh \
-    LOSS=pgpu_document \
+    LOSS=document \
     ARCHITECTURE=SoftMinPoolMILModelforPRM \
-    WARMUP=200 \
     GPU_IDS=0,1,2,3 \
     EPOCHS=1 \
     LR=1e-6 \
@@ -9,14 +8,13 @@ bash scripts/run_mil.sh \
     DATASET_TRAIN_SPLIT=math \
     EVAL_DATASET_PATH=Qwen/ProcessBench \
     DATASET_TEST_SPLIT=math \
-    OUTPUT_DIR=ckpts/shepherd/Qwen3-4B-softmin-segment-math
+    OUTPUT_DIR=ckpts/shepherd/Qwen3-4B-softmin-document-math
 
-rm -rf ckpts/shepherd/Qwen3-4B-softmin-segment-math/checkpoint-*/global_step*
+rm -rf ckpts/shepherd/Qwen3-4B-softmin-document-math/checkpoint-*/global_step*
 
 bash scripts/run_mil.sh \
-    LOSS=pgpu_document \
+    LOSS=document \
     ARCHITECTURE=NaiveMILModelforPRM \
-    WARMUP=200 \
     GPU_IDS=0,1,2,3 \
     EPOCHS=1 \
     LR=1e-6 \
@@ -24,9 +22,24 @@ bash scripts/run_mil.sh \
     DATASET_TRAIN_SPLIT=math \
     EVAL_DATASET_PATH=Qwen/ProcessBench \
     DATASET_TEST_SPLIT=math \
-    OUTPUT_DIR=ckpts/shepherd/Qwen3-4B-naive-segment-math
+    OUTPUT_DIR=ckpts/shepherd/Qwen3-4B-naive-document-math
 
-rm -rf ckpts/shepherd/Qwen3-4B-naive-segment-math/checkpoint-*/global_step*
+rm -rf ckpts/shepherd/Qwen3-4B-naive-document-math/checkpoint-*/global_step*
 
+bash scripts/run_mil.sh \
+    LOSS=document \
+    ARCHITECTURE=SoftMinPoolMILModelforPRM \
+    GPU_IDS=0,1,2,3 \
+    EPOCHS=1 \
+    LR=1e-6 \
+    DATASET_PATH=data/math-shepherd-Qwen3-4B-softmin-document-balanced/eval_annotations.jsonl \
+    DATASET_TRAIN_SPLIT=math \
+    EVAL_DATASET_PATH=Qwen/ProcessBench \
+    DATASET_TEST_SPLIT=math \
+    OUTPUT_DIR=ckpts/shepherd/Qwen3-4B-softmin-document-math-relabel
+
+rm -rf ckpts/shepherd/Qwen3-4B-softmin-document-math-relabel/checkpoint-*/global_step*
+
+conda activate verl
 cd /data2/jty/GAN-verl
 sh machine_spec/placeholder.sh
