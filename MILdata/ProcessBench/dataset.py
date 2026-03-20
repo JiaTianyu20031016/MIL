@@ -67,7 +67,7 @@ def _record_to_document_sample(
 			Segment(
 				label=int(is_positive),
 				positive_prob=is_positive,
-				text=f"{clean_text}\n\n",
+				text=clean_text,
 			)
 		)
 
@@ -77,7 +77,7 @@ def _record_to_document_sample(
 	positives = sum(segment.positive_prob for segment in segments)
 	rating = positives / len(segments)
 	document_positive = 1.0 if rating == 1.0 else 0.0
-	prompt = f"{problem}\n\n"
+	prompt = problem
 	doc_id = record.get("id") or f"{split_name}-{position}"
 
 	return DocumentSample(

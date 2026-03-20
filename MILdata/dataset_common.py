@@ -59,6 +59,8 @@ class TokenizedDocumentDataset(Dataset):
         samples: Sequence[DocumentSample],
         tokenizer: Any,
         *,
+        separator: Optional[str] = '\n\n',
+        apply_chat_template: bool = False,
         max_length: Optional[int] = None,
     ) -> None:
         if getattr(tokenizer, "pad_token_id", None) is None:
@@ -68,12 +70,23 @@ class TokenizedDocumentDataset(Dataset):
         self._max_length = max_length
         self._pad_token_id = tokenizer.pad_token_id
 
+        # separator used to join prompt and segments for the "document_text" field
+        self.separator = separator if separator is not None else ''
+        # whether to apply a chat-style template to the prompt and segments when constructing "document_text"
+        self.apply_chat_template = apply_chat_template
+
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self._samples)
 
     def __getitem__(self, index: int) -> Dict[str, Any]:
         sample = self._samples[index]
-        tokenized = _encode_document(sample, self._tokenizer, self._max_length)
+        tokenized = _encode_document(
+            sample, 
+            self._tokenizer, 
+            separator=self.separator,
+            apply_chat_template=self.apply_chat_template,
+            max_length=self._max_length
+        )
         tokenized.update(
             {
                 "doc_id": sample.doc_id,
@@ -81,9 +94,6 @@ class TokenizedDocumentDataset(Dataset):
                 "rating": sample.rating,
                 "source": sample.source,
                 "granularity": sample.granularity,
-                "prompt_text": sample.prompt,
-                "document_text": sample.prompt + "".join(segment.text for segment in sample.segments).strip(),
-                "segment_texts": [segment.text for segment in sample.segments],
                 "segment_positive_probs": [segment.positive_prob for segment in sample.segments],
             }
         )
@@ -119,14 +129,29 @@ def build_document_dataloader(
 def _encode_document(
     sample: DocumentSample,
     tokenizer: Any,
-    max_length: Optional[int],
+    separator: Optional[str] = '\n\n',
+    apply_chat_template: Optional[bool] = False,
+    max_length: Optional[int] = None
 ) -> Dict[str, Any]:
-    prompt_ids = _ensure_1d_ids(tokenizer(sample.prompt, add_special_tokens=False))
+    separator = separator if separator is not None else ''
+    prompt = sample.prompt + separator
+    if apply_chat_template:
+        messages = [
+            {
+                'role': 'user',
+                'content': prompt
+            }
+        ]
+        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+        # if 'qwen3' in tokenizer.name_or_path.lower():
+        #     prompt += "<think>\n\n</think>\n\n"
+    prompt_ids = _ensure_1d_ids(tokenizer(prompt, add_special_tokens=False))
+
     flat_ids = prompt_ids.copy()
     segment_lengths: List[int] = []
     segment_token_ids: List[List[int]] = []
     for segment in sample.segments:
-        encoded = tokenizer(segment.text, add_special_tokens=False)
+        encoded = tokenizer(segment.text + separator, add_special_tokens=False)
         ids = _ensure_1d_ids(encoded)
         segment_token_ids.append(ids)
         segment_lengths.append(len(ids))
@@ -154,6 +179,10 @@ def _encode_document(
         "attention_mask": attention_mask,
         "segment_ends": segment_ends,
         "segment_token_ids": segment_token_ids,
+        "prompt_ids": prompt_ids,
+        "prompt_text": prompt,
+        "segment_texts": [segment.text + separator for segment in sample.segments],
+        "document_text": prompt + "".join(segment.text + separator for segment in sample.segments).strip(),
     }
 
 

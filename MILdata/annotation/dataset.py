@@ -76,13 +76,13 @@ def _parse_dataset(
 				continue
 
 			doc_id = str(record.get("id", f"{path.stem}-{line_number - 1}"))
-			prompt = str(record.get("prompt", "")) + "\n\n"
+			prompt = str(record.get("prompt", ""))
 
 			segments = [
 				Segment(
 					label=bool(label),
 					positive_prob=1.0 if label else 0.0,
-					text=str(completion) + "\n\n",
+					text=str(completion),
 				)
 				for completion, label in zip(completions, labels)
 			]

@@ -158,9 +158,9 @@ def _parse_dataset_split(
             continue
 
         doc_id = f"{split_name}-{idx}"
-        prompt = record['prompt'] + '\n\n'
+        prompt = record['prompt']
         segments = [
-            Segment(label=label, positive_prob=1.0 if label else 0.0, text=completion + '\n\n')
+            Segment(label=label, positive_prob=1.0 if label else 0.0, text=completion)
             for completion, label in zip(completions, labels)
         ]
         positives = sum(segment.positive_prob for segment in segments)

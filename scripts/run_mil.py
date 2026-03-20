@@ -70,7 +70,9 @@ ARCHITECTURE_TO_MODEL_CLASS = {
     "ConjucturePoolMILModelforPRM": ConjucturePoolMILModelforPRM,
     "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
     "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
-    "NaiveMILModelforPRM": NaiveMILModelforPRM
+    "NaiveMILModelforPRM": NaiveMILModelforPRM,
+    "DPOBaselineModelforPRM": DPOBaselineModelforPRM,
+    "BufferBaselineModelforPRM": BufferBaselineModelforPRM,
 }
 
 # Enable logging in a Hugging Face Space
@@ -159,12 +161,18 @@ if __name__ == "__main__":
     random.seed(42)
     train_samples = load_dataset_fn(name=script_args.dataset_name, split=script_args.dataset_train_split)
     random.shuffle(train_samples)
-    train_dataset = TokenizedDocumentDataset(train_samples, tokenizer=tokenizer)
+    if isinstance(model, DPOBaselineModelforPRM):
+        train_dataset = TokenizedDocumentDataset(train_samples, tokenizer=tokenizer, separator='', apply_chat_template=True)
+    else:
+        train_dataset = TokenizedDocumentDataset(train_samples, tokenizer=tokenizer)
     
     eval_dataset_name = script_args.eval_dataset_name if script_args.eval_dataset_name else script_args.dataset_name
     eval_samples = load_dataset_fn(name=eval_dataset_name, split=script_args.dataset_test_split)
     random.shuffle(eval_samples)
-    eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer)
+    if isinstance(model, DPOBaselineModelforPRM):
+        eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer, separator='', apply_chat_template=True)
+    else:
+        eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer)
 
     logger.info(f"Loaded {len(train_dataset)} training samples and {len(eval_dataset)} evaluation samples.")
 

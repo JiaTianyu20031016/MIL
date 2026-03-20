@@ -22,7 +22,7 @@ from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
 )
-from MILmodel.mil_model_for_prm import ProbAveragePoolMILModelforPRM, AttentionPoolMILModelforPRM, NaiveMILModelforPRM  # pylint: disable=wrong-import-position
+from MILmodel.mil_model_for_prm import *
 from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-position
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--per-device-batch-size",
         type=int,
-        default=8,
+        default=4,
         help="Per-device batch size used by the trainer.",
     )
     parser.add_argument(
@@ -102,14 +102,6 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     logging.info("Running MIL pipeline smoke test with backbone %s", args.backbone)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.backbone,
-        trust_remote_code=args.trust_remote_code,
-    )
-    _ensure_padding_token(tokenizer)
-
-    model = NaiveMILModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
-
     training_args = MILConfig(
         loss_type="segment",
         output_dir=args.output_dir,
@@ -126,8 +118,16 @@ def main() -> None:
         bf16=True,
         fp16=False,
         dataloader_pin_memory=False,
-        annotation_output='ckpts'
     )
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.backbone,
+        trust_remote_code=args.trust_remote_code,
+    )
+    _ensure_padding_token(tokenizer)
+
+    model = DPOBaselineModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
+
 
     ##############
     # Load dataset
@@ -135,10 +135,20 @@ def main() -> None:
     collator = create_mil_data_collator(tokenizer)
 
     samples = load_mil_dataset(hf_dataset=args.dataset, split="train")[:args.limit]
-    train_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    train_dataset = TokenizedDocumentDataset(
+        samples, 
+        tokenizer=tokenizer, 
+        apply_chat_template=True,
+        separator=''
+    )
     
     samples = load_mil_dataset(hf_dataset=args.dataset, split="test")[:args.limit]
-    eval_dataset = TokenizedDocumentDataset(samples, tokenizer=tokenizer)
+    eval_dataset = TokenizedDocumentDataset(
+        samples, 
+        tokenizer=tokenizer, 
+        apply_chat_template=True, 
+        separator=''
+    )
 
     ##########
     # Training

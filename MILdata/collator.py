@@ -15,11 +15,15 @@ class MILDataCollator:
             raise ValueError("Collate batch is empty.")
 
         max_seq_len = max(len(item["input_ids"]) for item in batch)
+        max_prompt_seq_len = max(len(item["prompt_ids"]) for item in batch)
         max_segments = max(len(item["segment_token_ids"]) for item in batch)
         batch_size = len(batch)
 
         input_ids = torch.full((batch_size, max_seq_len), self.pad_token_id, dtype=torch.long)
         attention_mask = torch.zeros((batch_size, max_seq_len), dtype=torch.long)
+        prompt_input_ids = torch.full((batch_size, max_prompt_seq_len), self.pad_token_id, dtype=torch.long)
+        prompt_attention_mask = torch.zeros((batch_size, max_prompt_seq_len), dtype=torch.long)
+        
         segment_ends = (
             torch.full((batch_size, max_segments), -1, dtype=torch.long)
             if max_segments > 0
@@ -46,6 +50,7 @@ class MILDataCollator:
                 (batch_size, max_segments, max_segment_len), dtype=torch.long
             )
             segment_positive_probs = torch.zeros((batch_size, max_segments), dtype=torch.float32)
+        
         document_texts: List[str] = []
         prompt_texts: List[str] = []
         segment_texts: List[List[str]] = []
@@ -56,10 +61,16 @@ class MILDataCollator:
             input_ids[row, start:] = torch.tensor(item["input_ids"], dtype=torch.long)
             attention_mask[row, start:] = 1
 
+            prompt_length = len(item["prompt_ids"])
+            prompt_start = max_prompt_seq_len - prompt_length
+            prompt_input_ids[row, prompt_start:] = torch.tensor(item["prompt_ids"], dtype=torch.long)
+            prompt_attention_mask[row, prompt_start:] = 1
+
             ends = item["segment_ends"]
             if max_segments > 0 and ends:
                 shifted = [pos + start if pos >= 0 else -1 for pos in ends]
                 segment_ends[row, : len(ends)] = torch.tensor(shifted, dtype=torch.long)
+            
             document_texts.append(item.get("document_text", ""))
             prompt_texts.append(item.get("prompt_text", ""))
             segment_text_entries = item.get("segment_texts", [])
@@ -94,6 +105,8 @@ class MILDataCollator:
         batch_tensor = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
+            "prompt_input_ids": prompt_input_ids,
+            "prompt_attention_mask": prompt_attention_mask,
             "segment_ends": segment_ends,
             "positive_prob": torch.tensor(
                 [item["positive_prob"] for item in batch], dtype=torch.float32

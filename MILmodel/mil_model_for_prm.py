@@ -6,7 +6,8 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor, nn
 from transformers import AutoModel, AutoConfig, PretrainedConfig, AutoModelForCausalLM
-
+from trl.trainer.utils import selective_log_softmax
+from trl.models.utils import disable_gradient_checkpointing
 from .mil_base import BaseMILModel, MLP, LinearAttention, Batch
 
 class ProbAveragePoolMILModelforPRM(BaseMILModel):
@@ -485,6 +486,7 @@ class NaiveMILModelforPRM(BaseMILModel):
         hidden_size = self.pretrained_model.config.hidden_size
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
+    
 
     def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
@@ -592,22 +594,56 @@ class BufferBaselineModelforPRM(BaseMILModel):
 
 
 class DPOBaselineModelforPRM(BaseMILModel):
-    """Feeds segment batches through a pretrained backbone and averages predictions per document."""
+    """
+    Using a pretrained causal language model to compute token-level log-probabilities for the document and a reference model, then aggregating these log-probabilities at the segment level and feeding them through a classifier to get document-level predictions.
+    """
 
     transformers_parent_class = AutoModelForCausalLM
     supported_modules = ("ref_model",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, **kwargs):
+    def __init__(self, 
+                 pretrained_model, 
+                 decision_threshold=0.5, 
+                 beta=0.1, 
+                 accumulate_mode=False,
+                 **kwargs):
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
+        self.beta = beta
+        self.accumulate_mode = accumulate_mode
 
     def _init_weights(self, **kwargs):
-        self.ref_model = self.pretrained_model.clone()
+        self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
+        self.ref_model = self.transformers_parent_class.from_pretrained(
+            self.pretrained_model.config._name_or_path,
+            config=self.pretrained_model.config,
+        ).to(dtype=self.backbone_dtype)
+
+    @staticmethod
+    def compute_completion_mask(batch: Batch) -> Tensor:
+        # the following is left padded
+        document_mask = batch["attention_mask"]
+        prompt_mask = batch["prompt_attention_mask"]
+        seq_len = document_mask.size(1)
+        device = document_mask.device
+
+        prompt_mask = prompt_mask.to(device)
+        doc_lengths = document_mask.sum(dim=1)
+        prompt_lengths = prompt_mask.sum(dim=1)
+        assert (prompt_lengths <= doc_lengths).all(), "Prompt length cannot exceed document length for any example in the batch."
+        completion_lengths = (doc_lengths - prompt_lengths).clamp_min(0)
+        completion_start = seq_len - completion_lengths
+
+        positions = torch.arange(seq_len, device=device).unsqueeze(0)
+        completion_mask = (positions >= completion_start.unsqueeze(1)) & document_mask.bool()   # shape: [batch, seq_len]
+        return completion_mask.long()
+
 
     def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
         document_mask: Tensor = batch["attention_mask"]
+        completion_mask = self.compute_completion_mask(batch)
 
         if segment_ids.dim() != 3 or segment_mask.dim() != 3:
             raise ValueError("Segment tensors must be 3D with shape [batch, segments, seq_len].")
@@ -622,25 +658,75 @@ class DPOBaselineModelforPRM(BaseMILModel):
             empty = torch.zeros((0, 2), dtype=dtype, device=device)
             return doc_probs, empty, None
 
-        # forward
-        outputs = self.pretrained_model(
-            input_ids=document_ids,
-            attention_mask=document_mask,
-            output_hidden_states=True,
+        model_kwargs = {
+            "input_ids": document_ids, 
+            "attention_mask": document_mask, 
+            "use_cache": False
+        }
+
+        outputs = self.pretrained_model(**model_kwargs)
+        shift_logits = outputs.logits[..., :-1, :].contiguous()
+        shift_labels = document_ids[..., 1:].contiguous()
+        shift_completion_mask = completion_mask[..., 1:].contiguous()
+        per_token_logps = selective_log_softmax(shift_logits, shift_labels)
+        per_token_logps[shift_completion_mask == 0] = 0.0  # mask out non-completion tokens
+
+        # When gradient checkpointing is enabled with use_reentrant=True (default), calling the model inside a
+        # torch.no_grad() block triggers a harmless PyTorch warning ("None of the inputs have requires_grad=True").
+        # Temporarily disable checkpointing to avoid this warning during inference.
+        with torch.no_grad():
+            ref_outputs = self.ref_model(**model_kwargs)
+            ref_shift_logits = ref_outputs.logits[..., :-1, :].contiguous()
+            ref_per_token_logps = selective_log_softmax(ref_shift_logits, shift_labels)
+            ref_per_token_logps[shift_completion_mask == 0] = 0.0  # mask out non-completion tokens
+
+        # compute per-segment logits from cumulative log-probability ratios
+        end_positions = batch["segment_ends"]  # shape [batch, max_segments]
+        valid_segment_mask = segment_mask.any(dim=-1)
+
+        logp_ratio = self.beta * (per_token_logps - ref_per_token_logps)  # shape [batch, seq_len - 1]
+        token_len = logp_ratio.size(-1)
+
+        if token_len > 0:
+            # aggregate all the previous tokens' log probability ratios up to each segment end position
+            cumulative_ratio = logp_ratio.cumsum(dim=-1)
+            segment_end_indices = end_positions - 1  # align with shifted log-probs
+            clamped_indices = segment_end_indices.clamp(min=0, max=token_len - 1)
+            expanded_cumsum = cumulative_ratio.unsqueeze(1).expand(-1, max_segments, -1)
+            gathered = torch.gather(expanded_cumsum, dim=2, index=clamped_indices.unsqueeze(-1)).squeeze(-1)
+            if not self.accumulate_mode:
+                # take the difference between cumulative sums to get the sum within each segment
+                gathered = torch.cat([
+                    torch.zeros((batch_size, 1), dtype=dtype, device=device),
+                    gathered
+                ], dim=1)
+                gathered = gathered.diff(dim=1)
+            # mask out invalid segments (those with end positions outside the valid token range) by setting their scores to zero
+            segment_scores = torch.where(
+                segment_end_indices >= 0,
+                gathered,
+                torch.zeros_like(gathered),
+            )
+
+        else:
+            segment_scores = torch.zeros((batch_size, max_segments), dtype=dtype, device=device)
+
+        segment_pos_probs = torch.sigmoid(segment_scores)
+        segment_probs_grid = torch.stack([1 - segment_pos_probs, segment_pos_probs], dim=-1)
+        segment_logits_grid = torch.stack([-segment_scores, segment_scores], dim=-1)
+
+        default_prob_row = torch.tensor([1.0, 0.0], dtype=dtype, device=device).view(1, 1, 2)
+        segment_probs_grid = torch.where(valid_segment_mask.unsqueeze(-1), segment_probs_grid, default_prob_row)
+        segment_logits_grid = torch.where(
+            valid_segment_mask.unsqueeze(-1),
+            segment_logits_grid,
+            torch.zeros_like(segment_logits_grid),
         )
 
-        # extract segment embeddings at each segment's end position
-        end_positions = batch["segment_ends"]  # shape [batch, max_segments]
-        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, max_segments)
-        segment_embeddings_grid = outputs.hidden_states[-1][batch_indices, end_positions] # shape [batch, max_segments, hidden]
-        segment_logits_grid = self.classifier(segment_embeddings_grid)    # shape [batch, max_segments, classes]
-        segment_probs_grid = torch.softmax(segment_logits_grid, dim=-1)   # shape [batch, max_segments, classes]
-
-        # document-level prediction by taking last valid segment's prediction
-        last_valid_indices = segment_mask.any(dim=-1).sum(dim=-1) - 1  # shape [batch]
-        batch_indices = torch.arange(batch_size, device=device)
-        document_probs = segment_probs_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
-        document_logits = segment_logits_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
+        doc_scores = logp_ratio.sum(dim=-1)
+        doc_pos_probs = torch.sigmoid(doc_scores)
+        document_probs = torch.stack([1 - doc_pos_probs, doc_pos_probs], dim=-1)
+        document_logits = torch.stack([-doc_scores, doc_scores], dim=-1)
 
         extras = {
             "segment_logits": segment_logits_grid,
@@ -657,4 +743,6 @@ __all__ = [
     "MinPoolMILModelforPRM", 
     "SoftMinPoolMILModelforPRM",
     "NaiveMILModelforPRM",
+    "BufferBaselineModelforPRM",
+    "DPOBaselineModelforPRM",
 ]
