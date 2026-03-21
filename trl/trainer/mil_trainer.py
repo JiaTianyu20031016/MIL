@@ -505,7 +505,12 @@ class MILTrainer(_BaseTrainer):
         return loss
     
     @staticmethod
-    def noisy_segment_loss(outputs: MILModelOutput, document_target_prob: torch.Tensor, segment_valid_mask: torch.Tensor) -> torch.Tensor:
+    def noisy_segment_loss(
+        outputs: MILModelOutput, 
+        document_target_prob: torch.Tensor, 
+        segment_valid_mask: torch.Tensor,
+        last_index_scale: float = 1.0
+    ) -> torch.Tensor:
         '''
         propagate the document-level label to segments as noisy labels, and calculate the cross-entropy loss for all segments with valid labels. 
         '''
@@ -513,13 +518,19 @@ class MILTrainer(_BaseTrainer):
         segment_target_prob = document_target_prob.unsqueeze(1).expand_as(outputs.segment_probs[:,:,0])[segment_valid_mask]
         if segment_target_prob is None or segment_pred_probs.size(0) == 0:
             return None
+        
+        valid_segment_cnt = segment_valid_mask.sum(dim=-1)  # shape: (batch_size,)
+        last_segment_index = valid_segment_cnt.cumsum(dim=0) - 1  # shape: (batch_size,). Cumulative sum to get the correct last segment index after flattening.
+        last_segment_mask = torch.arange(segment_pred_probs.size(0), device=segment_pred_probs.device).unsqueeze(1) == last_segment_index.unsqueeze(0)  # shape: (num_valid_segments, batch_size)
+        last_segment_mask = last_segment_mask.any(dim=-1)  # shape: (num_valid_segments,). True for the last valid segment of each sample.
+        last_segment_factor = 1.0 + (last_index_scale - 1.0) * last_segment_mask.float()  # shape: (num_valid_segments,). Scale the loss for the last valid segment if last_index_scale > 1.0.
 
         target = segment_target_prob.to(segment_pred_probs.device, dtype=segment_pred_probs.dtype)
         target = target.clamp(0.0, 1.0)
         target_matrix = torch.stack([1.0 - target, target], dim=-1)
         log_probs = torch.log(segment_pred_probs.clamp_min(1e-8))
-        loss = -(target_matrix * log_probs).sum(dim=-1).mean()
-        return loss
+        loss = -(target_matrix * log_probs).sum(dim=-1) * last_segment_factor
+        return loss.mean()
 
     def pgpu_document_loss(self, outputs: MILModelOutput, document_target_prob: torch.Tensor) -> torch.Tensor:
         '''
@@ -563,7 +574,7 @@ class MILTrainer(_BaseTrainer):
 
         # If not set, defaults from model config and may warn since cache isn't compatible with gradient checkpointing
         inputs["use_cache"] = False
-        outputs = model(**inputs)
+        outputs = model(eval=not self.model.training, **inputs)
 
         document_target_prob = inputs.get("positive_prob")
         segment_target_prob = inputs.get("segment_positive_probs")
@@ -667,6 +678,7 @@ class MILTrainer(_BaseTrainer):
             completions = gather_object(inputs.get("segment_texts"))
             sources = gather_object(inputs.get("source"))
             document_annotations = document_pred_labels.tolist()
+            document_labels = document_target_labels.tolist()
             segment_labels = segment_target_labels.tolist()
             segment_num = segment_valid_mask.sum(dim=-1).tolist()
             segment_labels = [labels[:num] for labels, num in zip(segment_labels, segment_num)]
@@ -688,7 +700,7 @@ class MILTrainer(_BaseTrainer):
                         )
                         for c in  completions[i]
                     ],
-                    "annotation": document_annotations[i],
+                    "annotation": document_annotations[i] if document_labels[i] == 1 else 0,  # if the document is labeled as negative, we will label all segments as negative regardless of the model prediction
                     "labels": segment_labels[i],
                     "source": sources[i],
                 }

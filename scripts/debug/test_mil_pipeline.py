@@ -11,13 +11,13 @@ from typing import Sequence
 import torch
 from transformers import AutoTokenizer
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"  # Adjust this based on your available GPUs
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"  # Adjust this based on your available GPUs
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from MILdata.PRM800K.dataset import (  # pylint: disable=wrong-import-position
+from MILdata.shepherd.dataset import (  # pylint: disable=wrong-import-position
     TokenizedDocumentDataset,
     create_mil_data_collator,
     load_dataset as load_mil_dataset,
@@ -27,14 +27,14 @@ from trl.trainer.mil_trainer import MILTrainer  # pylint: disable=wrong-import-p
 from trl.trainer.mil_config import MILConfig  # pylint: disable=wrong-import-position
 
 
-DEFAULT_BACKBONE = "/data2/Common_LLM_Base/Qwen/Qwen3-4B/"
+# DEFAULT_BACKBONE = "ckpts/shepherd/Qwen3-4B-buffer-noisysegment-math"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dataset", 
-        default="MILdata/PRM800K/data/data_balanced", 
+        default="peiyi9979/Math-Shepherd", 
         help="Name of the MIL dataset to load."
     )
     parser.add_argument(
@@ -103,7 +103,7 @@ def main() -> None:
     logging.info("Running MIL pipeline smoke test with backbone %s", args.backbone)
 
     training_args = MILConfig(
-        loss_type="segment",
+        loss_type="noisy_segment",
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_batch_size,
         per_device_eval_batch_size=args.per_device_batch_size,
@@ -126,7 +126,7 @@ def main() -> None:
     )
     _ensure_padding_token(tokenizer)
 
-    model = DPOBaselineModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
+    model = BufferBaselineModelforPRM.from_pretrained(args.backbone, trust_remote_code=args.trust_remote_code)
 
 
     ##############
@@ -134,20 +134,16 @@ def main() -> None:
     ##############
     collator = create_mil_data_collator(tokenizer)
 
-    samples = load_mil_dataset(hf_dataset=args.dataset, split="train")[:args.limit]
+    samples = load_mil_dataset(hf_dataset=args.dataset, split="math")[:args.limit]
     train_dataset = TokenizedDocumentDataset(
         samples, 
         tokenizer=tokenizer, 
-        apply_chat_template=True,
-        separator=''
     )
     
-    samples = load_mil_dataset(hf_dataset=args.dataset, split="test")[:args.limit]
+    # samples = load_mil_dataset(hf_dataset=args.dataset, split="test")[:args.limit]
     eval_dataset = TokenizedDocumentDataset(
         samples, 
         tokenizer=tokenizer, 
-        apply_chat_template=True, 
-        separator=''
     )
 
     ##########

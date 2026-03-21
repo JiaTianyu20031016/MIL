@@ -23,7 +23,7 @@ class ProbAveragePoolMILModelforPRM(BaseMILModel):
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -124,7 +124,7 @@ class InstanceAveragePoolMILModelforPRM(BaseMILModel):
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -222,7 +222,7 @@ class AttentionPoolMILModelforPRM(BaseMILModel):
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
         self.attention = LinearAttention(input_dim=hidden_size).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -284,7 +284,7 @@ class ConjucturePoolMILModelforPRM(BaseMILModel):
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
         self.attention = LinearAttention(input_dim=hidden_size).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -345,7 +345,7 @@ class MinPoolMILModelforPRM(BaseMILModel):
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -409,7 +409,7 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -488,7 +488,7 @@ class NaiveMILModelforPRM(BaseMILModel):
         self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
     
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -545,9 +545,9 @@ class BufferBaselineModelforPRM(BaseMILModel):
     def _init_weights(self, **kwargs):
         hidden_size = self.pretrained_model.config.hidden_size
         self.backbone_dtype = next(self.pretrained_model.parameters()).dtype
-        self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=2).to(dtype=self.backbone_dtype)
+        self.classifier = MLP(input_dim=hidden_size, hidden_dim=hidden_size, output_dim=3).to(dtype=self.backbone_dtype)
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]
@@ -580,6 +580,16 @@ class BufferBaselineModelforPRM(BaseMILModel):
         segment_logits_grid = self.classifier(segment_embeddings_grid)    # shape [batch, max_segments, classes]
         segment_probs_grid = torch.softmax(segment_logits_grid, dim=-1)   # shape [batch, max_segments, classes]
 
+        # random buffer dropout: beta ~ Bornulli(segment_buffer_prob)
+        segment_buffer_prob = segment_probs_grid[..., 2]  # shape [batch, max_segments]
+        if not eval:   
+            random_buffer_mask = (torch.rand((batch_size, max_segments), device=device) < segment_buffer_prob)  # shape [batch, max_segments]
+        else:
+            random_buffer_mask = torch.zeros((batch_size, max_segments), dtype=torch.bool, device=device)
+        negative_probs = segment_probs_grid[..., 0] + segment_buffer_prob * random_buffer_mask.float()
+        positive_probs = segment_probs_grid[..., 1] + segment_buffer_prob * random_buffer_mask.float()
+        segment_probs_grid = torch.stack([negative_probs, positive_probs], dim=-1)
+
         # document-level prediction by taking last valid segment's prediction
         last_valid_indices = segment_mask.any(dim=-1).sum(dim=-1) - 1  # shape [batch]
         batch_indices = torch.arange(batch_size, device=device)
@@ -589,6 +599,7 @@ class BufferBaselineModelforPRM(BaseMILModel):
         extras = {
             "segment_logits": segment_logits_grid,
             "document_logits": document_logits,
+            "random_buffer_mask": random_buffer_mask,
         }
         return document_probs, segment_probs_grid, extras
 
@@ -638,7 +649,7 @@ class DPOBaselineModelforPRM(BaseMILModel):
         return completion_mask.long()
 
 
-    def _forward_impl(self, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
+    def _forward_impl(self, eval, batch: Batch) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         segment_ids: Tensor = batch["segment_input_ids"]
         segment_mask: Tensor = batch["segment_attention_mask"]
         document_ids: Tensor = batch["input_ids"]

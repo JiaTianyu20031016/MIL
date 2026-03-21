@@ -85,24 +85,24 @@ class BaseMILModel(PreTrainedModelWrapper):
         raise ValueError("Both 'segment_input_ids' and 'segment_attention_mask' must be 3D tensors if segments are present.")
         return segment_ids.size(0)
 
-    @staticmethod
-    def _ensure_prob_matrix(matrix: Tensor, batch_size: int, *, matrix_name: str) -> Tensor:
-        if batch_size == 0:
-            return matrix.view(0, 2)
-        if matrix.dim() != 2 or matrix.size(1) != 2:
-            raise ValueError(f"{matrix_name} must be a [batch, 2] tensor.")
-        if matrix.size(0) != batch_size:
-            raise ValueError(f"{matrix_name} length does not match batch size.")
-        return matrix
+    # @staticmethod
+    # def _ensure_prob_matrix(matrix: Tensor, batch_size: int, *, matrix_name: str) -> Tensor:
+    #     if batch_size == 0:
+    #         return matrix.view(0, 2)
+    #     if matrix.dim() != 2 or matrix.size(1) != 2:
+    #         raise ValueError(f"{matrix_name} must be a [batch, 2] tensor.")
+    #     if matrix.size(0) != batch_size:
+    #         raise ValueError(f"{matrix_name} length does not match batch size.")
+    #     return matrix
 
-    @staticmethod
-    def _ensure_target_vector(vector: Tensor, batch_size: int, *, vector_name: str) -> Tensor:
-        if batch_size == 0:
-            return vector.view(0)
-        vector = vector.view(-1)
-        if vector.size(0) != batch_size:
-            raise ValueError(f"{vector_name} length does not match batch size.")
-        return vector
+    # @staticmethod
+    # def _ensure_target_vector(vector: Tensor, batch_size: int, *, vector_name: str) -> Tensor:
+    #     if batch_size == 0:
+    #         return vector.view(0)
+    #     vector = vector.view(-1)
+    #     if vector.size(0) != batch_size:
+    #         raise ValueError(f"{vector_name} length does not match batch size.")
+    #     return vector
 
     # @staticmethod
     # def _compute_loss(
@@ -126,9 +126,15 @@ class BaseMILModel(PreTrainedModelWrapper):
             if key not in batch:
                 raise ValueError(f"Batch is missing required key '{key}'.")
 
+    @staticmethod
+    def _normalize_probs(probs: Tensor) -> Tensor:
+        sum = probs.sum(dim=-1, keepdim=True)
+        return probs / sum.clamp_min(1e-8)
+
 
     def forward(
         self,
+        eval: bool = False,
         **batch: Tensor,
     ) -> MILModelOutput:  # type: ignore[override]
         """Run inference on a batch from the MIL data loader."""
@@ -136,14 +142,15 @@ class BaseMILModel(PreTrainedModelWrapper):
         working_batch: Dict[str, Any] = dict(batch)
 
         self._validate_batch(working_batch)
-        document_probs, segment_probs, extras = self._forward_impl(working_batch)
+        document_probs, segment_probs, extras = self._forward_impl(eval, working_batch)
         doc_count = self._document_count(working_batch)
         seg_count = self._segment_count(working_batch)
 
-        document_pos_probs = document_probs[:, 1]
-        segment_pos_probs = segment_probs[:, :, 1]
-        document_predictions = (document_pos_probs >= self.decision_threshold).long()
-        segment_predictions = (segment_pos_probs >= self.decision_threshold).long()
+        # NOTE: the normalized probabilities are only used for computing predictions, the raw probabilities are returned in the output for computing loss.
+        document_normalized_pos_probs = self._normalize_probs(document_probs)
+        segment_pos_probs = self._normalize_probs(segment_probs)
+        document_predictions = (document_normalized_pos_probs[:, 1] >= self.decision_threshold).long()
+        segment_predictions = (segment_pos_probs[:, :, 1] >= self.decision_threshold).long()
 
         output = MILModelOutput(
             document_probs=document_probs,
@@ -157,7 +164,7 @@ class BaseMILModel(PreTrainedModelWrapper):
 
 
     def _forward_impl(
-        self, batch: Batch
+        self, eval: bool, batch: Batch
     ) -> Tuple[Tensor, Tensor, Optional[Dict[str, Tensor]]]:
         """Subclasses must return document probs, segment probs, optional extras."""
         raise NotImplementedError
