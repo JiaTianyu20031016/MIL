@@ -18,6 +18,7 @@ OUTPUT_DIR="ckpts/debug"
 
 LR=1e-5
 EPOCHS=1
+MAX_STEPS=-1
 TRAIN_PER_DEVICE_BS=8
 EVAL_PER_DEVICE_BS=8
 GRAD_ACC=8
@@ -83,6 +84,7 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate
     --pu_warmup_steps "${WARMUP}" \
     --learning_rate "${LR}" \
     --num_train_epochs "${EPOCHS}" \
+    --max_steps "${MAX_STEPS}" \
     --per_device_train_batch_size "${TRAIN_PER_DEVICE_BS}" \
     --per_device_eval_batch_size "${EVAL_PER_DEVICE_BS}" \
     --gradient_accumulation_steps "${GRAD_ACC}" \

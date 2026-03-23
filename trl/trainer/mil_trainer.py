@@ -670,6 +670,12 @@ class MILTrainer(_BaseTrainer):
                     200 * error_detection_positive_accuracy * error_detection_negative_accuracy / (error_detection_positive_accuracy + error_detection_negative_accuracy + 1e-8)
                 )
 
+            # other extra metrics
+            for key in outputs.extras:
+                if 'debug' in key:
+                    metric_value = self.accelerator.gather_for_metrics(outputs.extras[key]).mean().item()
+                    self._metrics[mode][key].append(metric_value)
+
         # dump the model predictions for analysis if annotation_output is set
         if self.annotation_output is not None:
             from accelerate.utils import gather_object

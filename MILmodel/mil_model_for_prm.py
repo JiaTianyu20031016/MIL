@@ -467,10 +467,19 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
 
         document_probs = (segment_probs_grid * masked_softmin_weights.unsqueeze(-1)).sum(dim=1)  # shape [batch, classes]
         document_logits = torch.log(document_probs + 1e-6)  # add small constant for numerical stability
+        
+        # debug metrics
+        weight_entropy = -(softmin_weights * (softmin_weights + 1e-8).log()).sum(dim=1)  # shape [batch], measure of how many segments are contributing to the prediction (higher entropy means more segments are contributing)
+        relative_positions = torch.arange(max_segments, device=device).unsqueeze(0).expand(batch_size, -1) / max_segments  # shape [batch, max_segments], relative position of each segment in the document
+        weighted_relative_position = (relative_positions * softmin_weights).sum(dim=1)  # shape [batch], average relative position of the segments contributing to the prediction (higher means more later segments are contributing)
 
         extras = {
             "segment_logits": segment_logits_grid,
             "document_logits": document_logits,
+            "softmin_weights": softmin_weights,
+            "masked_softmin_weights": masked_softmin_weights,
+            "debug_weight_entropy": weight_entropy,
+            "debug_weighted_relative_position": weighted_relative_position,
         }
         return document_probs, segment_probs_grid, extras
 

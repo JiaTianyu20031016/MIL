@@ -123,27 +123,27 @@ def _parse_dataset_split(
         # filter the dataset according to the 'task' column
         if split_name.endswith("_balanced"):
             base_name = split_name.rsplit("_", 1)[0]
-            filtered_split = split.filter(lambda record: record["task"].lower() == base_name)
+            split = split.filter(lambda record: record["task"].lower() == base_name)
         else:
-            filtered_split = split.filter(lambda record: record["task"].lower() == split_name)
-        
-        # add the prompt/completions/labels columns, and filter out any records that failed to parse
-        split = filtered_split.map(add_prompt_completions_labels)
-        split = split.filter(lambda record: not record[_SKIP_FIELD])
-        split = split.remove_columns(_SKIP_FIELD)
+            split = split.filter(lambda record: record["task"].lower() == split_name)
 
-        # If the split name ends with "_balanced", balance the dataset by correctness of the final step
-        if split_name.endswith("_balanced"):
-            correct = split.filter(lambda example: example["labels"][-1] == 1)
-            incorrect = split.filter(lambda example: example["labels"][-1] == 0)
+    # add the prompt/completions/labels columns, and filter out any records that failed to parse
+    split = split.map(add_prompt_completions_labels)
+    split = split.filter(lambda record: not record[_SKIP_FIELD])
+    split = split.remove_columns(_SKIP_FIELD)
 
-            min_size = min(len(correct), len(incorrect))
-            if min_size == 0:
-                raise ValueError("Cannot balance split because one of the classes is empty.")
+    # If the split name ends with "_balanced", balance the dataset by correctness of the final step
+    if split_name.endswith("_balanced"):
+        correct = split.filter(lambda example: example["labels"][-1] == 1)
+        incorrect = split.filter(lambda example: example["labels"][-1] == 0)
 
-            correct = correct.shuffle(seed=42).select(range(min_size))
-            incorrect = incorrect.shuffle(seed=42).select(range(min_size))
-            split = concatenate_datasets([correct, incorrect]).shuffle(seed=42)
+        min_size = min(len(correct), len(incorrect))
+        if min_size == 0:
+            raise ValueError("Cannot balance split because one of the classes is empty.")
+
+        correct = correct.shuffle(seed=42).select(range(min_size))
+        incorrect = incorrect.shuffle(seed=42).select(range(min_size))
+        split = concatenate_datasets([correct, incorrect]).shuffle(seed=42)
 
     # Finally, convert each record into a DocumentSample
     for idx, record in enumerate(split):

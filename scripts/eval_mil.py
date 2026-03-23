@@ -70,7 +70,9 @@ ARCHITECTURE_TO_MODEL_CLASS = {
     "ConjucturePoolMILModelforPRM": ConjucturePoolMILModelforPRM,
     "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
     "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
-    "NaiveMILModelforPRM": NaiveMILModelforPRM
+    "NaiveMILModelforPRM": NaiveMILModelforPRM,
+    "BufferBaselineModelforPRM": BufferBaselineModelforPRM,
+    "DPOBaselineModelforPRM": DPOBaselineModelforPRM,
 }
 
 # Enable logging in a Hugging Face Space
@@ -161,8 +163,10 @@ if __name__ == "__main__":
     eval_dataset_name = script_args.eval_dataset_name if script_args.eval_dataset_name else script_args.dataset_name
     eval_samples = load_dataset_fn(name=eval_dataset_name, split=script_args.dataset_test_split)
     random.shuffle(eval_samples)
-    eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer)
-
+    if not isinstance(model, DPOBaselineModelforPRM):
+        eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer)
+    else:
+        eval_dataset = TokenizedDocumentDataset(eval_samples, tokenizer=tokenizer, separator='', apply_chat_template=True)
     ##########
     # Training
     ##########
