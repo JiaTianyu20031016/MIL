@@ -159,7 +159,7 @@ if __name__ == "__main__":
     
     import random
     random.seed(42)
-    train_samples = load_dataset_fn(name=script_args.dataset_name, split=script_args.dataset_train_split)[:100]
+    train_samples = load_dataset_fn(name=script_args.dataset_name, split=script_args.dataset_train_split)
     random.shuffle(train_samples)
     if isinstance(model, DPOBaselineModelforPRM):
         train_dataset = TokenizedDocumentDataset(train_samples, tokenizer=tokenizer, separator='', apply_chat_template=True)

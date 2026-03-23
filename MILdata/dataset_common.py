@@ -43,12 +43,12 @@ def load_hf_split(*, split_name: str, dataset_id: str, config_name: Optional[str
 
     dataset_path = Path(dataset_id).expanduser()
     if dataset_path.exists():
-        dataset = load_from_disk(str(dataset_path))
+        dataset = load_from_disk(str(dataset_path), keep_in_memory=True)
         if split_name not in dataset:
             raise ValueError(f"Split '{split_name}' not found in dataset stored at '{dataset_path}'.")
         return dataset[split_name]
 
-    return hf_load_dataset(dataset_id, name=config_name, split=split_name)
+    return hf_load_dataset(dataset_id, name=config_name, split=split_name, keep_in_memory=True)
 
 
 class TokenizedDocumentDataset(Dataset):

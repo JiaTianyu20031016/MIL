@@ -561,7 +561,12 @@ class MILTrainer(_BaseTrainer):
     
     def pad_and_gather_for_metrics(self, tensor: torch.Tensor, pad_dim: int = 0, pad_value: int = 0) -> torch.Tensor:
         # Pad the tensor to the same length across all processes before gathering for metrics calculation. This is needed for segment-level predictions since different processes may have different max_segments due to dynamic padding.
-        max_length = self.accelerator.gather_for_metrics(torch.tensor(tensor.shape[pad_dim], device=tensor.device)).max().item()
+        
+        # NOTE: never use self.accelerator.gather_for_metrics to gather batch-inconsistent tensor
+        # because gather_for_metrics will try to truncate the additional data in the last batch.
+        # if the tensor to be gathered is not in shape [batch, ...], the truncation may cause out-of-expectation errors.
+        # should use gather instead.
+        max_length = self.accelerator.gather(torch.tensor(tensor.shape[pad_dim], device=tensor.device)).max().item()
         if tensor.shape[pad_dim] < max_length:
             pad_sizes = [(0, 0)] * len(tensor.shape)
             pad_sizes[pad_dim] = (0, max_length - tensor.shape[pad_dim])
@@ -599,11 +604,11 @@ class MILTrainer(_BaseTrainer):
         with torch.no_grad():
             document_loss = self.document_loss(outputs, document_target_prob)
             self._metrics[mode]["document_loss"].append(
-                self.accelerator.gather_for_metrics(document_loss).mean().item()
+                self.accelerator.gather(document_loss).mean().item()
             )
             segment_loss = self.segment_loss(outputs, segment_target_prob, segment_valid_mask)
             self._metrics[mode]["segment_loss"].append(
-                self.accelerator.gather_for_metrics(segment_loss).mean().item()
+                self.accelerator.gather(segment_loss).mean().item()
             )
 
             # gather results across ranks for calculating metrics
@@ -673,7 +678,9 @@ class MILTrainer(_BaseTrainer):
             # other extra metrics
             for key in outputs.extras:
                 if 'debug' in key:
-                    metric_value = self.accelerator.gather_for_metrics(outputs.extras[key]).mean().item()
+                    # we may not assume that the tensors in outputs.extras are batch-consistent
+                    # so use accelerator.gather instead of gather_for_metrics to gather the tensors
+                    metric_value = self.accelerator.gather(outputs.extras[key]).mean().item()
                     self._metrics[mode][key].append(metric_value)
 
         # dump the model predictions for analysis if annotation_output is set
