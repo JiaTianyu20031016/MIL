@@ -509,7 +509,7 @@ class MILTrainer(_BaseTrainer):
         outputs: MILModelOutput, 
         document_target_prob: torch.Tensor, 
         segment_valid_mask: torch.Tensor,
-        last_index_scale: float = 1.0
+        last_index_scale: float = 3.0
     ) -> torch.Tensor:
         '''
         propagate the document-level label to segments as noisy labels, and calculate the cross-entropy loss for all segments with valid labels. 
@@ -614,8 +614,11 @@ class MILTrainer(_BaseTrainer):
             # gather results across ranks for calculating metrics
             document_pred_labels = self.accelerator.gather_for_metrics(outputs.document_predictions).long()  # (batch_size,)
             document_target_labels = self.accelerator.gather_for_metrics((document_target_prob >= 0.5).long())  # (batch_size,)
+            document_pred_probs = self.accelerator.gather_for_metrics(outputs.document_probs)  # (batch_size, 2)
+            
             segment_pred_labels = self.pad_and_gather_for_metrics(outputs.segment_predictions, pad_dim=1, pad_value=0).long()    # (batch_size, max_segments)
             segment_target_labels = self.pad_and_gather_for_metrics((segment_target_prob >= 0.5).long(), pad_dim=1, pad_value=0)  # (batch_size, max_segments)
+            segment_pred_probs = self.pad_and_gather_for_metrics(outputs.segment_probs, pad_dim=1, pad_value=0)  # (batch_size, max_segments, 2)
             segment_valid_mask = self.pad_and_gather_for_metrics(segment_valid_mask, pad_dim=1, pad_value=0)  # (batch_size, max_segments)
 
             document_accuracies = (document_pred_labels == document_target_labels).float()
@@ -690,11 +693,19 @@ class MILTrainer(_BaseTrainer):
             prompts = gather_object(inputs.get("prompt_texts"))
             completions = gather_object(inputs.get("segment_texts"))
             sources = gather_object(inputs.get("source"))
+            
             document_annotations = document_pred_labels.tolist()
             document_labels = document_target_labels.tolist()
+            document_pred_positive_prob = document_pred_probs[:,1].tolist()  # probability of being labeled as positive
+            
+            segment_annotations = segment_pred_labels.tolist()
             segment_labels = segment_target_labels.tolist()
+            segment_pred_positive_probs = segment_pred_probs[:,:,1].tolist()  # probability of being labeled as positive
             segment_num = segment_valid_mask.sum(dim=-1).tolist()
+            segment_annotations = [annotations[:num] for annotations, num in zip(segment_annotations, segment_num)]
             segment_labels = [labels[:num] for labels, num in zip(segment_labels, segment_num)]
+            segment_pred_positive_probs = [probs[:num] for probs, num in zip(segment_pred_positive_probs, segment_num)]
+            
             # note that the length of document_annotations and segment_labels may be smaller than doc_ids, prompts, and completions since the inputs may be padded for distributed training
             # the padding occurs in the end of the batch, so we can simply ignore the extra samples after the length of document_annotations and segment_labels
             annotation_data = [
@@ -713,8 +724,12 @@ class MILTrainer(_BaseTrainer):
                         )
                         for c in  completions[i]
                     ],
-                    "annotation": document_annotations[i] if document_labels[i] == 1 else 0,  # if the document is labeled as negative, we will label all segments as negative regardless of the model prediction
-                    "labels": segment_labels[i],
+                    "document_label": document_labels[i],
+                    "document_annotation": document_annotations[i], # if document_labels[i] == 1 else 0,  # if the document is labeled as negative, we will label all segments as negative regardless of the model prediction
+                    "document_pred_positive_prob": document_pred_positive_prob[i],
+                    "segment_labels": segment_labels[i],
+                    "segment_annotations": segment_annotations[i],
+                    "segment_pred_positive_probs": segment_pred_positive_probs[i],
                     "source": sources[i],
                 }
                 for i in range(len(document_annotations))

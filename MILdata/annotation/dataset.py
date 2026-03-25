@@ -57,8 +57,8 @@ def _parse_dataset(
 				) from exc
 
 			completions = record.get("completions")
-			labels = record.get("labels")
-			document_annotation = record.get("annotation")
+			labels = record.get("segment_labels")
+			document_annotation = record.get("document_annotation")
 			source = record.get("source", source)
 
 			if not isinstance(completions, list) or not isinstance(labels, list):

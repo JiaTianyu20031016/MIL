@@ -67,7 +67,7 @@ ARCHITECTURE_TO_MODEL_CLASS = {
     "ProbAveragePoolMILModelforPRM": ProbAveragePoolMILModelforPRM,
     "InstanceAveragePoolMILModelforPRM": InstanceAveragePoolMILModelforPRM,
     "AttentionPoolMILModelforPRM": AttentionPoolMILModelforPRM,
-    "ConjucturePoolMILModelforPRM": ConjucturePoolMILModelforPRM,
+    "ConjunctivePoolMILModelforPRM": ConjunctivePoolMILModelforPRM,
     "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
     "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
     "NaiveMILModelforPRM": NaiveMILModelforPRM,

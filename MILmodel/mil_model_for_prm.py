@@ -270,7 +270,7 @@ class AttentionPoolMILModelforPRM(BaseMILModel):
         }
         return document_probs, segment_probs_grid, extras
 
-class ConjucturePoolMILModelforPRM(BaseMILModel):
+class ConjunctivePoolMILModelforPRM(BaseMILModel):
     """Feeds segment batches through a pretrained backbone and averages predictions per document."""
 
     supported_modules = ("classifier","attention")
@@ -592,9 +592,10 @@ class BufferBaselineModelforPRM(BaseMILModel):
         # random buffer dropout: beta ~ Bornulli(segment_buffer_prob)
         segment_buffer_prob = segment_probs_grid[..., 2]  # shape [batch, max_segments]
         if not eval:   
-            random_buffer_mask = (torch.rand((batch_size, max_segments), device=device) < segment_buffer_prob)  # shape [batch, max_segments]
+            random_buffer_mask = (torch.rand((batch_size, max_segments), device=device) > segment_buffer_prob)  # shape [batch, max_segments]
         else:
             random_buffer_mask = torch.zeros((batch_size, max_segments), dtype=torch.bool, device=device)
+        # random_buffer_mask = torch.ones((batch_size, max_segments), dtype=torch.bool, device=device)
         negative_probs = segment_probs_grid[..., 0] + segment_buffer_prob * random_buffer_mask.float()
         positive_probs = segment_probs_grid[..., 1] + segment_buffer_prob * random_buffer_mask.float()
         segment_probs_grid = torch.stack([negative_probs, positive_probs], dim=-1)
@@ -605,10 +606,13 @@ class BufferBaselineModelforPRM(BaseMILModel):
         document_probs = segment_probs_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
         document_logits = segment_logits_grid[batch_indices, last_valid_indices]  # shape [batch, classes]
 
+        # debug metircs
+        avg_buffer_prob = segment_buffer_prob[segment_mask.any(dim=-1)].mean()  # average buffer probability across all valid segments in the batch, for monitoring how much the model is relying on the buffer
         extras = {
             "segment_logits": segment_logits_grid,
             "document_logits": document_logits,
             "random_buffer_mask": random_buffer_mask,
+            "debug_avg_buffer_prob": avg_buffer_prob,
         }
         return document_probs, segment_probs_grid, extras
 
@@ -624,7 +628,7 @@ class DPOBaselineModelforPRM(BaseMILModel):
     def __init__(self, 
                  pretrained_model, 
                  decision_threshold=0.5, 
-                 beta=0.1, 
+                 beta=0.05, 
                  accumulate_mode=False,
                  **kwargs):
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
@@ -759,7 +763,7 @@ __all__ = [
     "ProbAveragePoolMILModelforPRM", 
     "InstanceAveragePoolMILModelforPRM", 
     "AttentionPoolMILModelforPRM", 
-    "ConjucturePoolMILModelforPRM", 
+    "ConjunctivePoolMILModelforPRM", 
     "MinPoolMILModelforPRM", 
     "SoftMinPoolMILModelforPRM",
     "NaiveMILModelforPRM",

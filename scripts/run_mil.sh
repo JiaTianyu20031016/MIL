@@ -17,6 +17,7 @@ DATASET_TEST_SPLIT="test"
 OUTPUT_DIR="ckpts/debug"
 
 LR=1e-5
+LR_SCHEDULER=cosine
 EPOCHS=1
 MAX_STEPS=-1
 TRAIN_PER_DEVICE_BS=8
@@ -83,6 +84,7 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate
     --loss_type "${LOSS}" \
     --pu_warmup_steps "${WARMUP}" \
     --learning_rate "${LR}" \
+    --lr_scheduler_type "${LR_SCHEDULER}" \
     --num_train_epochs "${EPOCHS}" \
     --max_steps "${MAX_STEPS}" \
     --per_device_train_batch_size "${TRAIN_PER_DEVICE_BS}" \
