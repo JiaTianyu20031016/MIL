@@ -3,19 +3,12 @@ set -euo pipefail
 
 GPU_IDS="0,1,2,3"
 MODEL_PATH="/data2/Common_LLM_Base/Qwen/Qwen3-4B/"
-
 DATASET_PATH="Qwen/ProcessBench"
 DATASET_SPLIT="math"
 OUTPUT_DIR="ckpts/debug"
 PER_DEVICE_BS=8
 ARCHITECTURE="InstanceAveragePoolMILModelforPRM"
 
-
-LR=1e-5
-EPOCHS=1
-GRAD_ACC=8
-EVAL_STEPS=10
-SAVE_STRATEGY="epoch"
 LOSS="document"
 
 # Parse CLI overrides: allow KEY=VALUE or --key value (keys mapped to UPPERCASE, dashes -> underscores)
@@ -69,15 +62,8 @@ CUDA_VISIBLE_DEVICES="${GPU_IDS}" accelerate launch --config_file trl/accelerate
     --model_name_or_path "${MODEL_PATH}" \
     --architecture "${ARCHITECTURE}" \
     --loss_type "${LOSS}" \
-    --learning_rate "${LR}" \
-    --num_train_epochs "${EPOCHS}" \
     --per_device_train_batch_size "${PER_DEVICE_BS}" \
     --per_device_eval_batch_size "${PER_DEVICE_BS}" \
-    --gradient_accumulation_steps "${GRAD_ACC}" \
-    --gradient_checkpointing \
-    --eval_strategy steps \
-    --eval_steps "${EVAL_STEPS}" \
-    --save_strategy "${SAVE_STRATEGY}" \
     --output_dir "${OUTPUT_DIR}" \
     --annotation_output "${OUTPUT_DIR}" \
     --remove_unused_columns false   \

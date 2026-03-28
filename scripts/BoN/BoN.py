@@ -9,7 +9,8 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
+import random
 
 
 @dataclass
@@ -47,6 +48,18 @@ def _parse_args() -> argparse.Namespace:
 		"--verbose",
 		action="store_true",
 		help="Print extra diagnostics (unmatched rollouts, missing annotations, etc.).",
+	)
+	parser.add_argument(
+		"--mode",
+		type=str,
+		default="PRM",
+		help="Evaluation mode (PRM or ORM).",
+	)
+	parser.add_argument(
+		"--seed",
+		type=int,
+		default=None,
+		help="Random seed for shuffling.",
 	)
 	return parser.parse_args()
 
@@ -100,6 +113,7 @@ def _assign_scores_from_annotations(
 	rollout_lookup: dict[str, RolloutRecord],
 	*,
 	verbose: bool = False,
+	mode: Literal["PRM", "ORM"] = "PRM",
 ) -> tuple[int, int, int]:
 	if not annotation_path.is_file():
 		raise FileNotFoundError(f"Annotation file '{annotation_path}' does not exist.")
@@ -129,26 +143,34 @@ def _assign_scores_from_annotations(
 					"Mismatch between number of completions and per-step probabilities for rollout "
 					f"{doc_id}."
 				)
-			score = _compute_rollout_score(probs)
+			score = _compute_rollout_score(probs, mode=mode)
 			target.score = score
 			matched_records += 1
 	return total_records, matched_records, missing_records
 
 
-def _compute_rollout_score(step_probs: Iterable[float]) -> float:
+def _compute_rollout_score(step_probs: Iterable[float], mode: Literal["PRM", "ORM"]) -> float:
 	values = [float(prob) for prob in step_probs]
 	if not values:
 		return 0.0
-	return min(values)
-
+	if mode == "PRM":
+		return min(values)
+	elif mode == "ORM":
+		return values[-1]
+	else:
+		raise ValueError(f"Unsupported mode '{mode}'. Supported modes are: 'PRM', 'ORM'.")
 
 def _compute_best_of_n(
 	rollouts_by_question: dict[str, list[RolloutRecord]],
 	n_values: list[int],
+	seed: int | None = None,
 ) -> dict[int, tuple[int, int]]:
 	results: dict[int, list[int]] = {n: [0, 0] for n in n_values}
 	for question_id, rollouts in rollouts_by_question.items():
 		ordered = sorted(rollouts, key=lambda record: record.order)
+		if seed is not None:
+			random.seed(seed)  # For reproducibility of results if shuffling is desired
+			random.shuffle(ordered)  # Shuffle to avoid any bias from original ordering
 		for n in n_values:
 			subset = ordered[:n]
 			scored = [record for record in subset if record.score is not None]
@@ -177,6 +199,7 @@ def main() -> None:
 		args.annotation_file,
 		rollout_lookup,
 		verbose=args.verbose,
+		mode=args.mode or "PRM",
 	)
 	total_annotation_records, matched_records, missing_records = annotation_stats
 	scored_rollouts = _count_scored_rollouts(rollouts_by_question)
@@ -190,7 +213,7 @@ def main() -> None:
 		f"{scored_rollouts} rollouts scored."
 	)
 
-	metrics = _compute_best_of_n(rollouts_by_question, n_values)
+	metrics = _compute_best_of_n(rollouts_by_question, n_values, seed=args.seed)
 	print("\nBest-of-n accuracy results:")
 	for n in n_values:
 		correct, total = metrics[n]

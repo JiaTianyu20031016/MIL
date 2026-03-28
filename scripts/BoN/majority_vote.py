@@ -51,6 +51,12 @@ def _parse_args() -> argparse.Namespace:
 		default=[1,4,8,16,32,64],
 		help="One or more n values specifying how many rollouts per idx participate in majority voting.",
 	)
+	parser.add_argument(
+		"--seed",
+		type=int,
+		default=None,
+		help="Random seed for shuffling rollouts before majority voting.",
+	)
 	return parser.parse_args()
 
 
@@ -150,8 +156,9 @@ def main() -> None:
 	if not n_values:
 		raise ValueError("At least one positive n value must be provided.")
 	rollouts = _load_rollouts(args.input_file)
-	random.seed(42)  # For reproducibility of results if shuffling is desired
-	random.shuffle(rollouts)  # Shuffle to avoid any bias from original ordering
+	if args.seed is not None:
+		random.seed(args.seed)  # For reproducibility of results if shuffling is desired
+		random.shuffle(rollouts)  # Shuffle to avoid any bias from original ordering
 
 	grouped = _group_by_idx(rollouts)
 	if not grouped:

@@ -71,6 +71,7 @@ ARCHITECTURE_TO_MODEL_CLASS = {
     "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
     "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
     "NaiveMILModelforPRM": NaiveMILModelforPRM,
+    "NoisyORPoolMILModelforPRM": NoisyORPoolMILModelforPRM,
     "DPOBaselineModelforPRM": DPOBaselineModelforPRM,
     "BufferBaselineModelforPRM": BufferBaselineModelforPRM,
 }
