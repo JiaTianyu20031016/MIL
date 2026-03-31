@@ -52,7 +52,7 @@ def _parse_args() -> argparse.Namespace:
 	parser.add_argument(
 		"--mode",
 		type=str,
-		default="PRM",
+		default=None,
 		help="Evaluation mode (PRM or ORM).",
 	)
 	parser.add_argument(
@@ -113,7 +113,7 @@ def _assign_scores_from_annotations(
 	rollout_lookup: dict[str, RolloutRecord],
 	*,
 	verbose: bool = False,
-	mode: Literal["PRM", "ORM"] = "PRM",
+	mode: Literal["PRM", "ORM"] | None = None,
 ) -> tuple[int, int, int]:
 	if not annotation_path.is_file():
 		raise FileNotFoundError(f"Annotation file '{annotation_path}' does not exist.")
@@ -135,15 +135,24 @@ def _assign_scores_from_annotations(
 				continue
 			if target.score is not None:
 				continue
-			probs = record.get("segment_pred_positive_probs")
-			if probs is None:
-				raise ValueError("Annotation record lacks 'segment_pred_positive_probs'.")
-			if len(probs) != len(target.completions):
-				raise ValueError(
-					"Mismatch between number of completions and per-step probabilities for rollout "
-					f"{doc_id}."
-				)
-			score = _compute_rollout_score(probs, mode=mode)
+			
+			if mode is None:
+				score = record.get("document_pred_positive_prob")
+				if score is None:
+					raise ValueError("Annotation record lacks 'document_pred_positive_prob'.")
+				score = float(score)
+			else:
+				probs = record.get("segment_pred_positive_probs")
+				if probs is None:
+					raise ValueError("Annotation record lacks 'segment_pred_positive_probs'.")
+				if len(probs) != len(target.completions):
+					# raise ValueError(
+					# 	f"Mismatch between number of completions {len(target.completions)} and per-step probabilities {len(probs)} for rollout "
+					# 	f"{doc_id}."
+					# )
+					print(f"[WARN] Mismatch between number of completions {len(target.completions)} and per-step probabilities {len(probs)} for rollout {doc_id}. Skipping score computation for this record.")
+					missing_records += 1
+				score = _compute_rollout_score(probs, mode=mode)
 			target.score = score
 			matched_records += 1
 	return total_records, matched_records, missing_records
@@ -199,7 +208,7 @@ def main() -> None:
 		args.annotation_file,
 		rollout_lookup,
 		verbose=args.verbose,
-		mode=args.mode or "PRM",
+		mode=args.mode,
 	)
 	total_annotation_records, matched_records, missing_records = annotation_stats
 	scored_rollouts = _count_scored_rollouts(rollouts_by_question)
