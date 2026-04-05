@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "MILmodel"
+version = "0.0.0"
+description = "MIL model utilities"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[tool.setuptools]
+packages = ["MILmodel"]
+package-dir = {"MILmodel" = "."}

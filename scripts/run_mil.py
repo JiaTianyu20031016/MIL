@@ -63,18 +63,6 @@ from MILmodel.mil_model_for_prm import *
 
 logger = logging.get_logger(__name__)
 
-ARCHITECTURE_TO_MODEL_CLASS = {
-    "ProbAveragePoolMILModelforPRM": ProbAveragePoolMILModelforPRM,
-    "InstanceAveragePoolMILModelforPRM": InstanceAveragePoolMILModelforPRM,
-    "AttentionPoolMILModelforPRM": AttentionPoolMILModelforPRM,
-    "ConjunctivePoolMILModelforPRM": ConjunctivePoolMILModelforPRM,
-    "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
-    "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
-    "NaiveMILModelforPRM": NaiveMILModelforPRM,
-    "NoisyORPoolMILModelforPRM": NoisyORPoolMILModelforPRM,
-    "DPOBaselineModelforPRM": DPOBaselineModelforPRM,
-    "BufferBaselineModelforPRM": BufferBaselineModelforPRM,
-}
 
 # Enable logging in a Hugging Face Space
 os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")

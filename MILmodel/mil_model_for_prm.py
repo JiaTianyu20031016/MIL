@@ -396,8 +396,11 @@ class MinPoolMILModelforPRM(BaseMILModel):
         # document-level prediction by taking the minimum segment probability for the positive class
         positive_probs = segment_probs_grid[..., 1]  # shape [batch, max_segments]
         valid_segment_mask = segment_mask.any(dim=-1)  # shape [batch, max_segments]
-        # random dropout of some valid segments during training for regularization (similar to DropBlock)
-        dropout_mask = (torch.rand_like(positive_probs) < self.dropout) & valid_segment_mask  # shape [batch, max_segments]
+        if not eval:
+            # random dropout of some valid segments during training for regularization (similar to DropBlock)
+            dropout_mask = (torch.rand_like(positive_probs) < self.dropout) & valid_segment_mask  # shape [batch, max_segments]
+        else:
+            dropout_mask = torch.zeros_like(positive_probs, dtype=torch.bool)  # no dropout during evaluation
         masked_positive_probs = positive_probs.masked_fill(~valid_segment_mask | dropout_mask, 1.0)  # treat invalid segments as having max positive probability
         min_positive_probs, _ = masked_positive_probs.min(dim=1)  # shape [batch]
         document_probs = torch.stack([1 - min_positive_probs, min_positive_probs], dim=-1)  # shape [batch, 2]
@@ -417,7 +420,7 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
 
     supported_modules = ("classifier",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, dropout=0.0, temperature=0.5, **kwargs):
+    def __init__(self, pretrained_model, decision_threshold=0.5, dropout=0.0, temperature=5, **kwargs):
         self.temperature = temperature
         self.dropout = dropout
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)
@@ -468,18 +471,21 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
         # we apply stop_gradient to the softmin weights
         softmin_weights = torch.softmax((1 - masked_positive_probs) / self.temperature, dim=1).detach()  # shape [batch, max_segments]
         
-        # random dropout of some valid segments during training for regularization (similar to DropBlock)
-        # the dropout probability is scaled by the softmin weights 
-        # so that segments with lower positive probability are more likely to be dropped, encouraging the model to consider multiple segments rather than just the most negative one
-        doc_positive_prob = batch.get("positive_prob")
-        if doc_positive_prob is not None:
-            negative_doc_mask = (doc_positive_prob.to(device=device) == 0).unsqueeze(1)
+        if not eval:
+            # random dropout of some valid segments during training for regularization (similar to DropBlock)
+            # the dropout probability is scaled by the softmin weights 
+            # so that segments with lower positive probability are more likely to be dropped, encouraging the model to consider multiple segments rather than just the most negative one
+            doc_positive_prob = batch.get("positive_prob")
+            if doc_positive_prob is not None:
+                negative_doc_mask = (doc_positive_prob.to(device=device) == 0).unsqueeze(1)
+            else:
+                print("Warning: positive_prob not found in batch, using no negative doc masking for dropout.")
+                negative_doc_mask = torch.ones((batch_size, 1), dtype=torch.bool, device=device)
+            dropout_mask = (
+                torch.rand_like(positive_probs) < self.dropout * softmin_weights
+            ) & valid_segment_mask & negative_doc_mask  # shape [batch, max_segments]
         else:
-            print("Warning: positive_prob not found in batch, using no negative doc masking for dropout.")
-            negative_doc_mask = torch.ones((batch_size, 1), dtype=torch.bool, device=device)
-        dropout_mask = (
-            torch.rand_like(positive_probs) < self.dropout * softmin_weights
-        ) & valid_segment_mask & negative_doc_mask  # shape [batch, max_segments]
+            dropout_mask = torch.zeros_like(positive_probs, dtype=torch.bool)  # no dropout during evaluation
         masked_softmin_weights = softmin_weights.masked_fill(~valid_segment_mask | dropout_mask, 0.0)  # shape [batch, max_segments], zero out weights for invalid and dropped segments
         masked_softmin_weights = masked_softmin_weights / masked_softmin_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)  # renormalize weights to sum to 1
 
@@ -845,6 +851,19 @@ class DPOBaselineModelforPRM(BaseMILModel):
         return document_probs, segment_probs_grid, extras
 
 
+ARCHITECTURE_TO_MODEL_CLASS = {
+    "ProbAveragePoolMILModelforPRM": ProbAveragePoolMILModelforPRM,
+    "InstanceAveragePoolMILModelforPRM": InstanceAveragePoolMILModelforPRM,
+    "AttentionPoolMILModelforPRM": AttentionPoolMILModelforPRM,
+    "ConjunctivePoolMILModelforPRM": ConjunctivePoolMILModelforPRM,
+    "MinPoolMILModelforPRM": MinPoolMILModelforPRM,
+    "SoftMinPoolMILModelforPRM": SoftMinPoolMILModelforPRM,
+    "NaiveMILModelforPRM": NaiveMILModelforPRM,
+    "NoisyORPoolMILModelforPRM": NoisyORPoolMILModelforPRM,
+    "DPOBaselineModelforPRM": DPOBaselineModelforPRM,
+    "BufferBaselineModelforPRM": BufferBaselineModelforPRM,
+}
+
 __all__ = [
     "ProbAveragePoolMILModelforPRM", 
     "InstanceAveragePoolMILModelforPRM", 
@@ -856,4 +875,5 @@ __all__ = [
     "NoisyORPoolMILModelforPRM",
     "BufferBaselineModelforPRM",
     "DPOBaselineModelforPRM",
+    "ARCHITECTURE_TO_MODEL_CLASS",
 ]
