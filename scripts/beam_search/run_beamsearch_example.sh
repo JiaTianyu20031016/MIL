@@ -1,0 +1,12 @@
+python /data1/jty/MIL/scripts/beam_search/beamsearch.py \
+  --model /path/to/your/model \
+  --prm_model /path/to/your/prm \
+  --dataset_name HuggingFaceH4/MATH-500 \
+  --split test \
+  --prompt_column problem \
+  --answer_column answer \
+  --beam_size 4 \
+  --expansion_per_beam 2 \
+  --max_steps 8 \
+  --step_separator "\n\n" \
+  --output_path /tmp/math_beamsearch.json
