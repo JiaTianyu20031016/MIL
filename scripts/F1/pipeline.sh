@@ -19,7 +19,6 @@ GPU_IDS="0,2,3"
 MODEL_PATH="ckpts/shepherd/Qwen2.5-Math-7B-Instruct/softmin-document-cosine/checkpoint-1158"
 DATASET_PATH="Qwen/ProcessBench"
 DATASET_SPLITS=("math" "omnimath" "olympiadbench" "gsm8k")
-OUTPUT_DIR="${MODEL_PATH}/eval"
 PER_DEVICE_BS=8
 ARCHITECTURE="InstanceAveragePoolMILModelforPRM"
 
@@ -53,6 +52,10 @@ while [[ $# -gt 0 ]]; do
     print_usage
     exit 1
 done
+
+if [[ -z "${OUTPUT_DIR:-}" ]]; then
+    OUTPUT_DIR="${MODEL_PATH}/eval"
+fi
 
 for SPLIT in "${DATASET_SPLITS[@]}"; do
     bash scripts/F1/evaluate.sh     \
