@@ -182,7 +182,7 @@ def _encode_document(
         "prompt_ids": prompt_ids,
         "prompt_text": prompt,
         "segment_texts": [segment.text + separator for segment in sample.segments],
-        "document_text": prompt + "".join(segment.text + separator for segment in sample.segments).strip(),
+        "document_text": prompt + "".join(segment.text + separator for segment in sample.segments),
     }
 
 

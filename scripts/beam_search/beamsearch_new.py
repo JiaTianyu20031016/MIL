@@ -1,10 +1,15 @@
 import argparse
 import json
+import logging
 import os
 import re
+import sys
+from logging.handlers import QueueHandler, QueueListener
+from queue import Empty
 from dataclasses import dataclass, field
 from multiprocessing import get_context
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
 from tqdm import tqdm
 
 import torch
@@ -36,21 +41,28 @@ INSTRUCTION_TEMPLATE = (
 )
 
 
-
-@dataclass
+@dataclass(frozen=True)
 class PromptItem:
 	idx: int
 	prompt: str
 	reference: str
 
+
 @dataclass
 class Beam:
-	prompt: PromptItem = None  # the raw question
-	steps: list = field(default_factory=list)    # the generated reasoning steps so far, without separators
-	score: float = 0.0        # the PRM score for the current set of steps (higher is better)
-	completed: bool = False     # whether the LLM has indicated completion (e.g., by outputting a boxed answer)
-	response: str = ""       # the full generated response from the LLM for the current set of steps, including separators and instructions
-	vllm_input: str = ""     # the final input string that was fed into vLLM to generate the next step
+	prompt: PromptItem
+	steps: List[str] = field(default_factory=list)
+	score: Optional[float] = None
+	completed: bool = False
+	response: str = ""
+	vllm_input: str = ""
+
+
+@dataclass(eq=False)
+class BeamGroup:
+	prompt: PromptItem
+	beams: List[Beam] = field(default_factory=list)
+	round_id: int = 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,6 +142,13 @@ def parse_args() -> argparse.Namespace:
 		default=None,
 		help="Optional chat template override (Jinja2 string)",
 	)
+	parser.add_argument(
+		"--batch_size",
+		type=int,
+		default=16,
+		help="Batch size for vLLM generation",
+	)
+
 
 	# PRM args
 	parser.add_argument(
@@ -202,12 +221,6 @@ def parse_args() -> argparse.Namespace:
 		help="Where to write the JSON output",
 	)
 	parser.add_argument(
-		"--num_gpus",
-		type=int,
-		default=1,
-		help="Number of GPUs / processes for data-parallel beam search",
-	)
-	parser.add_argument(
 		"--cuda_visible_devices",
 		type=str,
 		default=None,
@@ -217,15 +230,44 @@ def parse_args() -> argparse.Namespace:
 		),
 	)
 	parser.add_argument(
-		"--memory_mode",
-		type=str,
-		default="resident",
-		choices=["resident", "swap"],
-		help="Keep vLLM+PRM on GPU (resident) or swap them per step (swap)",
+		"--num_producers",
+		type=int,
+		default=1,
+		help="Number of producer workers",
+	)
+	parser.add_argument(
+		"--num_consumers",
+		type=int,
+		default=1,
+		help="Number of consumer workers",
 	)
 	parser.add_argument("--cache_dir", type=str, default=None)
 
 	return parser.parse_args()
+
+
+def setup_main_logger() -> logging.Logger:
+	logger = logging.getLogger("beamsearch")
+	logger.setLevel(logging.INFO)
+	handler = logging.StreamHandler()
+	formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+	handler.setFormatter(formatter)
+	logger.handlers = [handler]
+	logger.propagate = False
+	return logger
+
+
+def setup_worker_logger(log_queue) -> logging.Logger:
+	logger = logging.getLogger("beamsearch.worker")
+	logger.setLevel(logging.INFO)
+	logger.handlers = [QueueHandler(log_queue)]
+	logger.propagate = False
+	return logger
+
+
+def silence_worker_output() -> None:
+	sys.stdout = open(os.devnull, "w")
+	sys.stderr = open(os.devnull, "w")
 
 
 def build_instruction(step_separator: str) -> str:
@@ -337,13 +379,12 @@ def build_candidate_prompts(
 			if last_index != -1:
 				return formatted[: last_index + len(steps_text)]
 			return formatted
-		else:
-			messages = [{"role": "user", "content": user_content}]
-			return tokenizer.apply_chat_template(
-				messages,
-				tokenize=False,
-				add_generation_prompt=True,
-			)
+		messages = [{"role": "user", "content": user_content}]
+		return tokenizer.apply_chat_template(
+			messages,
+			tokenize=False,
+			add_generation_prompt=True,
+		)
 
 	return f"{prompt}\n\n{instruction}\n\n{steps_text}"
 
@@ -478,202 +519,377 @@ def release_cuda_memory() -> None:
 		torch.cuda.ipc_collect()
 
 
-def prm_worker(
-    args_dict,
-    prompts,
-    candidate_steps,
-    return_queue,
-):
-    args = argparse.Namespace(**args_dict)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # tokenizer
-    prm_tokenizer = AutoTokenizer.from_pretrained(
-        args.prm_model,
-        trust_remote_code=args.trust_remote_code,
-        cache_dir=args.cache_dir,
-    )
-    if prm_tokenizer.pad_token_id is None:
-        prm_tokenizer.pad_token_id = prm_tokenizer.eos_token_id
-
-    # model
-    prm_model = build_prm_model(args, device)
-    prm_model.config.pad_token_id = prm_tokenizer.pad_token_id
-
-    # scoring
-    scores = score_with_prm(
-        prm_model,
-        prm_tokenizer,
-        prompts,
-        candidate_steps,
-        batch_size=args.prm_batch_size,
-        max_length=args.prm_max_length,
-        separator=args.prm_separator,
-        apply_chat_template=args.prm_apply_chat_template,
-        device=device,
-    )
-
-    return_queue.put(scores)
-
-
-def vllm_worker(
-	args_dict,
-	prompt_pool,
-	return_queue,
-):
+def producer_worker(
+	producer_id: int,
+	args_dict: Dict[str, Any],
+	input_queue,
+	output_queue,
+	log_queue,
+) -> None:
+	# silence_worker_output()
+	logger = setup_worker_logger(log_queue)
 	args = argparse.Namespace(**args_dict)
-	llm = build_llm(args)
-	sampling_params = build_sampling_params(args, args.step_separator)
-	generated = generate_next_steps(llm, prompt_pool, sampling_params)
-	return_queue.put(generated)
-
-
-def beam_search_batch(
-	llm_tokenizer: AutoTokenizer,
-	prm_tokenizer: AutoTokenizer,
-	items: Sequence[PromptItem],
-	args: argparse.Namespace,
-	device: torch.device,
-	*,
-	llm: Optional[LLM] = None,
-	prm_model: Optional[torch.nn.Module] = None,
-) -> List[Dict[str, Any]]:
-	if not items:
-		return []
-
-	instruction = build_instruction(args.step_separator)
-	sampling_params = build_sampling_params(args, args.step_separator)
-
-	beams: List[Beam] = [
-		Beam(prompt=item) for item in items
-	]
-
-	for _ in range(args.max_steps):
-		# expand active beams
-		active_beams: List[Beam] = []
-		for beam in beams:
-			if beam.completed:
-				continue
-			beam.vllm_input = build_candidate_prompts(
-				prompt=beam.prompt.prompt,
-				steps=beam.steps,
-				instruction=instruction,
-				step_separator=args.step_separator,
-				use_chat_template=args.use_chat_template,
-				tokenizer=llm_tokenizer,
-			)
-			active_beams.append(beam)
-
-		if not active_beams:
-			break
-
-		if args.memory_mode == "resident":
-			prompt_pool = [beam.vllm_input for beam in active_beams]
-			generated = generate_next_steps(llm, prompt_pool, sampling_params)
+	if args.cuda_visible_devices:
+		visible = [item.strip() for item in args.cuda_visible_devices.split(",") if item.strip()]
+		if visible:
+			device_id = visible[producer_id % len(visible)]
+			os.environ["CUDA_VISIBLE_DEVICES"] = device_id
 		else:
-			ctx = get_context("spawn")
-			return_queue = ctx.Queue()
-			process = ctx.Process(
-				target=vllm_worker,
-				args=(
-					vars(args),
-					[beam.vllm_input for beam in active_beams],
-					return_queue,
-				),
-			)
-			process.start()
-			generated = return_queue.get()
-			print(f"Rank {os.environ['CUDA_VISIBLE_DEVICES']}: Generated candidate steps for {len(active_beams)} beams.")
-			process.join()
-			process.close()
-			
+			os.environ["CUDA_VISIBLE_DEVICES"] = str(producer_id)
+	else:
+		os.environ["CUDA_VISIBLE_DEVICES"] = str(producer_id)
 
-		new_beams: List[Beam] = []
-		for beam, responses in zip(active_beams, generated):
-			for response in responses:
-				step_text = response.strip()
-				if not step_text:
-					continue
-				new_steps = list(beam.steps) + [step_text]
-				full_response = args.step_separator.join(new_steps)
-				completed = extract_boxed(full_response) is not None
-				new_beams.append(
-					Beam(
-						prompt=beam.prompt,
-						steps=new_steps,
-						score=0.0,
-						completed=completed,
-						response=full_response,
-						vllm_input="",
-					)
-				)
+	llm = build_llm(args)
+	llm_tokenizer = AutoTokenizer.from_pretrained(
+		args.model,
+		trust_remote_code=args.trust_remote_code,
+		cache_dir=args.cache_dir,
+	)
+	if args.chat_template is not None:
+		llm_tokenizer.chat_template = args.chat_template
 
-		if not new_beams:
+	sampling_params = build_sampling_params(args, args.step_separator)
+	instruction = build_instruction(args.step_separator)
+
+	logger.info("[Producer %s] Initialized and waiting for input...", producer_id)
+
+	while True:
+		# fetch all the groups in input_queue
+		first_group = input_queue.get()
+		if first_group is None:
+			output_queue.put(None)
 			break
-        
-        # score new beams
-		if args.memory_mode == "resident":
-			pool_scores = score_with_prm(
+
+		groups: List[BeamGroup] = [first_group]
+		while True:
+			try:
+				next_group = input_queue.get_nowait()
+			except Empty:
+				break
+			if next_group is None:
+				output_queue.put(None)
+				return
+			groups.append(next_group)
+
+		# flatten all active beams
+		candidate_inputs: List[str] = []
+		beam_refs: List[Beam] = []
+		group_refs: List[BeamGroup] = []
+		pending_counts: Dict[BeamGroup, int] = {}
+		for group in groups:
+			active_beams = [beam for beam in group.beams if not beam.completed]
+			if not active_beams:
+				output_queue.put(group)
+				continue
+			pending_counts[group] = len(active_beams)
+			prompt_text = group.prompt.prompt
+			for beam in active_beams:
+				beam.vllm_input = build_candidate_prompts(
+					prompt=prompt_text,
+					steps=beam.steps,
+					instruction=instruction,
+					step_separator=args.step_separator,
+					use_chat_template=args.use_chat_template,
+					tokenizer=llm_tokenizer,
+				)
+				candidate_inputs.append(beam.vllm_input)
+				beam_refs.append(beam)
+				group_refs.append(group)
+
+		new_beams_by_group: Dict[BeamGroup, List[Beam]] = {}
+		batch_size = max(1, int(args.batch_size))
+		for start in range(0, len(candidate_inputs), batch_size):
+			batch_inputs = candidate_inputs[start : start + batch_size]
+			batch_beams = beam_refs[start : start + batch_size]
+			batch_groups = group_refs[start : start + batch_size]
+			generated = generate_next_steps(llm, batch_inputs, sampling_params)
+			for beam, group, responses in zip(batch_beams, batch_groups, generated):
+				for response in responses:
+					step_text = response.strip()
+					if not step_text:
+						continue
+					new_steps = list(beam.steps) + [step_text]
+					full_response = args.step_separator.join(new_steps)
+					completed = extract_boxed(full_response) is not None
+					new_beams_by_group.setdefault(group, []).append(
+						Beam(
+							prompt=beam.prompt,
+							steps=new_steps,
+							score=None,
+							completed=completed,
+							response=full_response,
+							vllm_input="",
+						)
+					)
+				pending_counts[group] -= 1
+				if pending_counts[group] == 0:
+					new_beams = new_beams_by_group.get(group, [])
+					if new_beams:
+						group.beams = [beam for beam in group.beams if beam.completed] + new_beams
+						group.round_id += 1
+					output_queue.put(group)
+					logger.info(
+						"[Producer %s] Round [%s] Group %s expanded.",
+						producer_id,
+						group.round_id,
+						group.prompt.idx,
+					)
+
+
+def consumer_worker(
+	consumer_id: int,
+	args_dict: Dict[str, Any],
+	input_queue,
+	output_queue,
+	log_queue,
+) -> None:
+	silence_worker_output()
+	logger = setup_worker_logger(log_queue)
+	args = argparse.Namespace(**args_dict)
+	if args.cuda_visible_devices:
+		visible = [item.strip() for item in args.cuda_visible_devices.split(",") if item.strip()]
+		if visible:
+			global_id = args.num_producers + consumer_id
+			device_id = visible[global_id % len(visible)]
+			os.environ["CUDA_VISIBLE_DEVICES"] = device_id
+		else:
+			os.environ["CUDA_VISIBLE_DEVICES"] = str(args.num_producers + consumer_id)
+	else:
+		os.environ["CUDA_VISIBLE_DEVICES"] = str(args.num_producers + consumer_id)
+
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	prm_tokenizer = AutoTokenizer.from_pretrained(
+		args.prm_model,
+		trust_remote_code=args.trust_remote_code,
+		cache_dir=args.cache_dir,
+	)
+	if prm_tokenizer.pad_token_id is None:
+		prm_tokenizer.pad_token_id = prm_tokenizer.eos_token_id
+
+	prm_model = build_prm_model(args, device)
+	prm_model.config.pad_token_id = prm_tokenizer.pad_token_id
+
+	logger.info("[Consumer %s] Initialized and waiting for input...", consumer_id)
+
+	while True:
+		first_group = input_queue.get()
+		if first_group is None:
+			output_queue.put(None)
+			break
+
+		groups: List[BeamGroup] = [first_group]
+		while True:
+			try:
+				next_group = input_queue.get_nowait()
+			except Empty:
+				break
+			if next_group is None:
+				output_queue.put(None)
+				return
+			groups.append(next_group)
+
+		beams_to_score: List[Beam] = []
+		prompt_texts: List[str] = []
+		candidate_steps: List[List[str]] = []
+		group_refs: List[BeamGroup] = []
+		pending_counts: Dict[BeamGroup, int] = {}
+		for group in groups:
+			unscored = [beam for beam in group.beams if beam.score is None]
+			if not unscored:
+				group.beams.sort(key=lambda beam: beam.score, reverse=True)
+				group.beams = group.beams[: args.beam_size]
+				output_queue.put(group)
+				continue
+			pending_counts[group] = len(unscored)
+			for beam in unscored:
+				beams_to_score.append(beam)
+				prompt_texts.append(group.prompt.prompt)
+				candidate_steps.append(beam.steps)
+				group_refs.append(group)
+
+		chunk_size = max(1, int(args.prm_batch_size))
+		for start in range(0, len(beams_to_score), chunk_size):
+			batch_beams = beams_to_score[start : start + chunk_size]
+			batch_prompts = prompt_texts[start : start + chunk_size]
+			batch_steps = candidate_steps[start : start + chunk_size]
+			batch_groups = group_refs[start : start + chunk_size]
+			scores = score_with_prm(
 				prm_model,
 				prm_tokenizer,
-				[beam.prompt.prompt for beam in new_beams],
-				[beam.steps for beam in new_beams],
+				batch_prompts,
+				batch_steps,
 				batch_size=args.prm_batch_size,
 				max_length=args.prm_max_length,
 				separator=args.prm_separator,
 				apply_chat_template=args.prm_apply_chat_template,
 				device=device,
 			)
-		else:
-			# wrap the PRM scoring in a subprocess to throughly release GPU memory after each scoring round
-			ctx = get_context("spawn")
-			return_queue = ctx.Queue()
-			process = ctx.Process(
-				target=prm_worker,
-				args=(
-					vars(args),
-					[beam.prompt.prompt for beam in new_beams],
-					[beam.steps for beam in new_beams],
-					return_queue,
-				),
+			for beam, group, score in zip(batch_beams, batch_groups, scores):
+				beam.score = float(score)
+				pending_counts[group] -= 1
+				if pending_counts[group] == 0:
+					group.beams.sort(key=lambda item: item.score or float("-inf"), reverse=True)
+					group.beams = group.beams[: args.beam_size]
+					output_queue.put(group)
+					logger.info(
+						"[Consumer %s] Round [%s] Group %s scored.",
+						consumer_id,
+						group.round_id,
+						group.prompt.idx,
+					)
+
+
+def build_initial_groups(prompts: Sequence[PromptItem]) -> List[BeamGroup]:
+	groups: List[BeamGroup] = []
+	for item in prompts:
+		groups.append(
+			BeamGroup(
+				prompt=item,
+				beams=[Beam(prompt=item)],
+				round_id=0,
 			)
-			process.start()
-			pool_scores = return_queue.get()
-			process.join()
-			process.close()
+		)
+	return groups
 
-		for score, beam in zip(pool_scores, new_beams):
-			beam.score = float(score)
-		
-        # sort and prune beams
-		new_beams = [beam for beam in beams if beam.completed] + new_beams
 
-		grouped: Dict[int, List[Beam]] = {item.idx: [] for item in items}
-		for beam in new_beams:
-			grouped[beam.prompt.idx].append(beam)
+def all_groups_completed(groups: Sequence[BeamGroup]) -> bool:
+	for group in groups:
+		if not group.beams:
+			return False
+		if any(not beam.completed for beam in group.beams):
+			return False
+	return True
 
-		beams = []
-		for item in items:
-			prompt_beams = grouped[item.idx]
-			if not prompt_beams:
-				beams.append(
-		            Beam(prompt=item)
+
+def group_completed(group: BeamGroup) -> bool:
+	return bool(group.beams) and all(beam.completed for beam in group.beams)
+
+
+def controller_main() -> None:
+	logger = setup_main_logger()
+	args = parse_args()
+	prompts = load_prompts(
+		dataset_name=args.dataset_name,
+		dataset_config=args.dataset_config,
+		split=args.split,
+		prompt_column=args.prompt_column,
+		answer_column=args.answer_column,
+		max_examples=args.max_examples,
+		cache_dir=args.cache_dir,
+	)
+	groups = build_initial_groups(prompts)
+	if not groups:
+		return
+	if args.cuda_visible_devices:
+		visible = [item.strip() for item in args.cuda_visible_devices.split(",") if item.strip()]
+		required = max(1, args.num_producers) + max(1, args.num_consumers)
+		if visible and len(visible) < required:
+			raise ValueError(
+				"Not enough CUDA devices for exclusive assignment: "
+				f"required={required}, available={len(visible)}"
+			)
+
+	ctx = get_context("spawn")
+	log_queue = ctx.Queue()
+	log_listener = QueueListener(log_queue, *logger.handlers)
+	log_listener.start()
+	producer_output = ctx.Queue()
+	consumer_output = ctx.Queue()
+	producer_inputs = [ctx.Queue() for _ in range(max(1, args.num_producers))]
+	consumer_inputs = [ctx.Queue() for _ in range(max(1, args.num_consumers))]
+
+	args_dict = vars(args)
+	producer_args = dict(args_dict)
+	consumer_args = dict(args_dict)
+
+	producers = []
+	for producer_id in range(max(1, args.num_producers)):
+		process = ctx.Process(
+			target=producer_worker,
+			args=(producer_id, producer_args, producer_inputs[producer_id], producer_output, log_queue),
+		)
+		process.start()
+		producers.append(process)
+
+	consumers = []
+	for consumer_id in range(max(1, args.num_consumers)):
+		process = ctx.Process(
+			target=consumer_worker,
+			args=(consumer_id, consumer_args, consumer_inputs[consumer_id], consumer_output, log_queue),
+		)
+		process.start()
+		consumers.append(process)
+
+	producer_index = 0
+	consumer_index = 0
+	producer_buffer = [group for group in groups]
+	consumer_buffer = []
+	completed_groups = []
+	while len(completed_groups) < len(groups):
+		# distribute producer_buffer to producers
+		while producer_buffer:
+			group = producer_buffer.pop()
+			if group is None:
+				continue
+			if group_completed(group) or group.round_id >= args.max_steps:
+				completed_groups.append(group)
+				logger.info(
+					"[Controller] Round [%s] Group %s completed with %s beams. Active groups: %s, Completed groups: %s",
+					group.round_id,
+					group.prompt.idx,
+					len(group.beams),
+					len(groups) - len(completed_groups),
+					len(completed_groups)
 				)
 				continue
-			prompt_beams.sort(key=lambda beam: beam.score, reverse=True)
-			beams.extend(prompt_beams[: args.beam_size])
+			producer_inputs[producer_index].put(group)
+			logger.info(
+				"[Controller] Round [%s] Dispatched group %s to producer %s",
+				group.round_id,
+				group.prompt.idx,
+				producer_index,
+			)
+			producer_index = (producer_index + 1) % args.num_producers
+		# collect producer output
+		while True:
+			try:
+				group = producer_output.get_nowait()
+				consumer_buffer.append(group)
+			except Empty:
+				break
+		# distribute consumer_buffer to consumers
+		while consumer_buffer:
+			group = consumer_buffer.pop()
+			consumer_inputs[consumer_index].put(group)
+			logger.info(
+				"[Controller] Round [%s] Dispatched group %s to consumer %s",
+				group.round_id,
+				group.prompt.idx,
+				consumer_index,
+			)
+			consumer_index = (consumer_index + 1) % args.num_consumers
+		# collect consumer output
+		while True:			
+			try:
+				group = consumer_output.get_nowait()
+				producer_buffer.append(group)
+			except Empty:
+				break
 
-		if all(beam.completed for beam in beams):
-			break
-
+	for queue in producer_inputs:
+		queue.put(None)
+	for queue in consumer_inputs:
+		queue.put(None)
+	for process in producers:
+		process.join()
+	for process in consumers:
+		process.join()
+	log_listener.stop()
 
 	results: List[Dict[str, Any]] = []
-	grouped_final: Dict[int, List[Beam]] = {item.idx: [] for item in items}
-	for beam in beams:
-		grouped_final[beam.prompt.idx].append(beam)
-
-	for item in items:
-		prompt_beams = grouped_final[item.idx]
+	for group in completed_groups:
+		item = group.prompt
+		prompt_beams = group.beams
 		if not prompt_beams:
 			prompt_beams = [
 				Beam(prompt=item)
@@ -698,143 +914,22 @@ def beam_search_batch(
 		best_beam = max(beam_records, key=lambda record: record["score"])
 		results.append(
 			{
+				"id": item.idx,
 				"prompt": item.prompt,
 				"reference": reference_boxed,
 				"beams": beam_records,
 				"best": best_beam,
 			}
 		)
-
-	return results
-
-
-def worker_run(
-	shard_id: int,
-	num_shards: int,
-	args_dict: Dict[str, Any],
-	prompts_data: List[PromptItem],
-	queue,
-) -> None:
-	args = argparse.Namespace(**args_dict)
-	if args.cuda_visible_devices:
-		visible = [item.strip() for item in args.cuda_visible_devices.split(",") if item.strip()]
-		if visible:
-			device_id = visible[shard_id % len(visible)]
-			os.environ["CUDA_VISIBLE_DEVICES"] = device_id
-		else:
-			os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
-	else:
-		os.environ["CUDA_VISIBLE_DEVICES"] = str(shard_id)
-	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-	llm_tokenizer = AutoTokenizer.from_pretrained(
-		args.model,
-		trust_remote_code=args.trust_remote_code,
-		cache_dir=args.cache_dir,
-	)
-	if args.chat_template is not None:
-		llm_tokenizer.chat_template = args.chat_template
-
-	prm_tokenizer = AutoTokenizer.from_pretrained(
-		args.prm_model,
-		trust_remote_code=args.trust_remote_code,
-		cache_dir=args.cache_dir,
-	)
-	if prm_tokenizer.pad_token_id is None:
-		prm_tokenizer.pad_token_id = prm_tokenizer.eos_token_id
-
-	prm_model = None
-	llm = None
-	if args.memory_mode == "resident":
-		prm_model = build_prm_model(args, device)
-		prm_model.config.pad_token_id = prm_tokenizer.pad_token_id
-		llm = build_llm(args)
-
-	shard_data = shard_list(prompts_data, shard_id, num_shards)
-	if not shard_data:
-		queue.put([])
-		return
-
-	results = beam_search_batch(
-		llm_tokenizer,
-		prm_tokenizer,
-		shard_data,
-		args,
-		device,
-		llm=llm,
-		prm_model=prm_model,
-	)
-	records = [
-		{
-			"task": "math",
-			"idx": item.idx,
-			**result,
-		}
-		for item, result in zip(shard_data, results)
-	]
-
-	queue.put(records)
-
-
-def compute_accuracy(records: Sequence[Dict[str, Any]]) -> float:
-	if not records:
-		return 0.0
-	correct = sum(1 for record in records if record["best"]["correctness"])
-	return correct / len(records)
-
-
-def main() -> None:
-	os.environ["TOKENIZERS_PARALLELISM"] = "false"
-	args = parse_args()
-	prompts_data = load_prompts(
-		dataset_name=args.dataset_name,
-		dataset_config=args.dataset_config,
-		split=args.split,
-		prompt_column=args.prompt_column,
-		answer_column=args.answer_column,
-		max_examples=args.max_examples,
-		cache_dir=args.cache_dir,
-	)
-
-	if args.num_gpus <= 1:
-		args_dict = vars(args)
-		queue = get_context("spawn").Queue()
-		worker_run(0, 1, args_dict, prompts_data, queue)
-		records = queue.get()
-	else:
-		ctx = get_context("spawn")
-		queue = ctx.Queue()
-		processes = []
-		args_dict = vars(args)
-		for shard_id in range(args.num_gpus):
-			process = ctx.Process(
-				target=worker_run,
-				args=(shard_id, args.num_gpus, args_dict, prompts_data, queue),
-			)
-			process.start()
-			processes.append(process)
-
-		records = []
-		for _ in range(args.num_gpus):
-			records.extend(queue.get())
-
-		for process in processes:
-			process.join()
-
-	records = sorted(records, key=lambda item: item["idx"])
-	accuracy = compute_accuracy(records)
-	output_payload = {
-		"accuracy": accuracy,
-		"num_examples": len(records),
-		"records": records,
-	}
-
+	
+	results.sort(key=lambda record: record["id"])
 	output_dir = os.path.dirname(args.output_path)
 	if output_dir:
 		os.makedirs(output_dir, exist_ok=True)
 	with open(args.output_path, "w", encoding="utf-8") as f:
-		json.dump(output_payload, f, ensure_ascii=False, indent=2)
+		json.dump(results, f, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
-	main()
+	controller_main()
+
