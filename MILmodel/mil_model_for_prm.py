@@ -420,7 +420,7 @@ class SoftMinPoolMILModelforPRM(BaseMILModel):
 
     supported_modules = ("classifier",)
 
-    def __init__(self, pretrained_model, decision_threshold=0.5, dropout=0.0, temperature=5, **kwargs):
+    def __init__(self, pretrained_model, decision_threshold=0.5, dropout=0.0, temperature=1, **kwargs):
         self.temperature = temperature
         self.dropout = dropout
         super().__init__(pretrained_model, decision_threshold=decision_threshold, **kwargs)

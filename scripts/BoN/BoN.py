@@ -53,7 +53,7 @@ def _parse_args() -> argparse.Namespace:
 		"--mode",
 		type=str,
 		default=None,
-		help="Evaluation mode (PRM or ORM).",
+		help="Evaluation mode.",
 	)
 	parser.add_argument(
 		"--seed",
@@ -113,7 +113,7 @@ def _assign_scores_from_annotations(
 	rollout_lookup: dict[str, RolloutRecord],
 	*,
 	verbose: bool = False,
-	mode: Literal["PRM", "ORM"] | None = None,
+	mode: Literal["Last", "Min", "Product"] | None = None,
 ) -> tuple[int, int, int]:
 	if not annotation_path.is_file():
 		raise FileNotFoundError(f"Annotation file '{annotation_path}' does not exist.")
@@ -162,12 +162,17 @@ def _compute_rollout_score(step_probs: Iterable[float], mode: Literal["PRM", "OR
 	values = [float(prob) for prob in step_probs]
 	if not values:
 		return 0.0
-	if mode == "PRM":
+	if mode == "Min":
 		return min(values)
-	elif mode == "ORM":
+	elif mode == "Last":
 		return values[-1]
+	elif mode == "Product":
+		product = 1.0
+		for value in values:
+			product *= value
+		return product
 	else:
-		raise ValueError(f"Unsupported mode '{mode}'. Supported modes are: 'PRM', 'ORM'.")
+		raise ValueError(f"Unsupported mode '{mode}'. Supported modes are: 'Min', 'Last', 'Product'.")
 
 def _compute_best_of_n(
 	rollouts_by_question: dict[str, list[RolloutRecord]],

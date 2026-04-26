@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from multiprocessing import get_context
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from tqdm import tqdm
+from queue import Empty
 
 import torch
 from datasets import load_dataset
@@ -222,6 +223,18 @@ def parse_args() -> argparse.Namespace:
 		default="resident",
 		choices=["resident", "swap"],
 		help="Keep vLLM+PRM on GPU (resident) or swap them per step (swap)",
+	)
+	parser.add_argument(
+		"--vllm_timeout",
+		type=int,
+		default=300,
+		help="Timeout in seconds for vLLM generation when using swap memory mode",
+	)
+	parser.add_argument(
+		"--vllm_max_retries",
+		type=int,
+		default=3,
+		help="Maximum number of retries for vLLM generation when using swap memory mode",
 	)
 	parser.add_argument("--cache_dir", type=str, default=None)
 
@@ -571,21 +584,35 @@ def beam_search_batch(
 			prompt_pool = [beam.vllm_input for beam in active_beams]
 			generated = generate_next_steps(llm, prompt_pool, sampling_params)
 		else:
-			ctx = get_context("spawn")
-			return_queue = ctx.Queue()
-			process = ctx.Process(
-				target=vllm_worker,
-				args=(
-					vars(args),
-					[beam.vllm_input for beam in active_beams],
-					return_queue,
-				),
-			)
-			process.start()
-			generated = return_queue.get()
-			print(f"Rank {os.environ['CUDA_VISIBLE_DEVICES']}: Generated candidate steps for {len(active_beams)} beams.")
-			process.join()
-			process.close()
+			for attempt in range(args.vllm_max_retries):
+				ctx = get_context("spawn")
+				return_queue = ctx.Queue()
+				process = ctx.Process(
+					target=vllm_worker,
+					args=(
+						vars(args),
+						[beam.vllm_input for beam in active_beams],
+						return_queue,
+					),
+				)
+				process.start()
+				try:
+					generated = return_queue.get(timeout=args.vllm_timeout)
+					process.join()
+					process.close()
+					break  # 成功就退出 retry 循环
+				except Empty:
+					print(
+						f"[Attempt {attempt+1}] Timeout after {args.vllm_timeout}s. Killing worker process..."
+					)
+					process.terminate()   # 强制杀死
+					process.join()
+					process.close()
+					if attempt == args.vllm_max_retries - 1:
+						raise RuntimeError("vLLM worker repeatedly timed out.")
+					else:
+						print("Retrying...")
+		print(f"Rank {os.environ['CUDA_VISIBLE_DEVICES']}: Generated candidate steps for {len(active_beams)} beams.")
 			
 
 		new_beams: List[Beam] = []
