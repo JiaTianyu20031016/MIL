@@ -209,7 +209,9 @@ def create_mil_data_collator(tokenizer: Any) -> MILDataCollator:
     """Convenience helper to build the default MILDataCollator from a tokenizer."""
 
     if getattr(tokenizer, "pad_token_id", None) is None:
-        raise ValueError("Tokenizer must define pad_token_id for batching.")
+        import warnings
+        warnings.warn("Tokenizer does not define pad_token_id. Using eos_token_id as fallback for padding.")
+        tokenizer.pad_token_id = tokenizer.eos_token_id
     return MILDataCollator(pad_token_id=tokenizer.pad_token_id)
 
 

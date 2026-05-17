@@ -59,6 +59,8 @@ from MILdata.ProcessBench.dataset import load_dataset as load_process_bench_data
 from MILdata.PRM800K.dataset import load_dataset as load_prm800k_dataset
 from MILdata.shepherd.dataset import load_dataset as load_math_shepherd_dataset
 from MILdata.annotation.dataset import load_dataset as load_annotation_dataset
+from MILdata.SCAN.dataset import load_dataset as load_scan_dataset
+from MILdata.MCTS.dataset import load_dataset as load_mcts_dataset
 from MILmodel.mil_model_for_prm import *
 
 logger = logging.get_logger(__name__)
@@ -135,7 +137,11 @@ if __name__ == "__main__":
     collator = create_mil_data_collator(tokenizer)
 
     def load_dataset_fn(name, split):
-        if name.endswith('jsonl'):
+        if 'mcts' in name.lower() and name.endswith('.json'):
+            return load_mcts_dataset(file_path=name)
+        elif 'scan' in name.lower() and name.endswith('.jsonl'):
+            return load_scan_dataset(file_path=name)
+        elif name.endswith('jsonl'):
             return load_annotation_dataset(file_path=name)
         elif 'shepherd' in name.lower():
             return load_math_shepherd_dataset(hf_dataset=name, split=split)

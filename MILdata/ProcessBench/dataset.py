@@ -17,7 +17,7 @@ from MILdata.dataset_common import (
 )
 
 
-ProcessBenchSplit = Literal["gsm8k", "math", "olympiadbench", "omnibench"]
+ProcessBenchSplit = Literal["gsm8k", "math", "olympiadbench", "omnimath"]
 DEFAULT_DATASET_ID = "Qwen/ProcessBench"
 
 
@@ -92,10 +92,5 @@ def _record_to_document_sample(
 
 
 __all__ = [
-	"DocumentSample",
-	"Segment",
-	"TokenizedDocumentDataset",
-	"build_document_dataloader",
-	"create_mil_data_collator",
 	"load_dataset",
 ]

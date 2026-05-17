@@ -716,7 +716,7 @@ class DPOBaselineModelforPRM(BaseMILModel):
 
     def __init__(self, 
                  pretrained_model, 
-                 ref_model='/data2/jty/models/Qwen2.5-Math-7B-Instruct',
+                 ref_model='/data2/Common_LLM_Base/meta-llama/Llama-3.2-3B-Instruct',
                  decision_threshold=0.5, 
                  beta=0.05, 
                  accumulate_mode=False,
